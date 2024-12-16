@@ -1,0 +1,252 @@
+#! /usr/bin/env Rscript
+
+# xnatR command-line interface
+#
+# This script provides a command-line interface to the xnatR package, allowing convenient access to XNAT repositories.
+#
+# Usage:
+#   xnat_cli.R <command> [options]
+#
+# Commands:
+#   init              Initialize configuration file
+#   authenticate      Authenticate with XNAT server
+#   list_projects     List projects
+#   list_subjects     List subjects in a project
+#   list_experiments  List experiments for a subject
+#   list_scans        List scans in an experiment
+#   download_files    Download files
+#   download_subject  Download all data for a subject
+#   download_all      Download all subjects' data from a project
+#   help              Display this help message
+#
+# Examples:
+#   xnat_cli.R init
+#   xnat_cli.R authenticate
+#   xnat_cli.R list_projects
+#   xnat_cli.R list_subjects --project_id TEST
+#   xnat_cli.R download_files --project_id TEST --subject_id SUBJ1 --experiment_id EXP1 --scan_id ALL
+#
+# For detailed help on a command, use xnat_cli.R help <command>
+#
+# The script uses the xnatR package and relies on the configuration file ~/.xnatR_config.yml for stored credentials.
+
+# Check for required packages
+required_packages <- c("xnatR", "yaml")
+for (pkg in required_packages) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    cat("The package '", pkg, "' is required but not installed. Please install it before running this script.\n", sep = "")
+    quit(status = 1)
+  }
+}
+library(xnatR)
+
+# Parse command-line arguments
+args <- commandArgs(trailingOnly = TRUE)
+
+# Help function
+print_help <- function() {
+  cat("
+xnatR command-line interface
+
+This script provides a command-line interface to the xnatR package, allowing convenient access to XNAT repositories.
+
+Usage:
+  xnat_cli.R <command> [options]
+
+Commands:
+  init              Initialize configuration file
+  authenticate      Authenticate with XNAT server
+  list_projects     List projects
+  list_subjects     List subjects in a project
+  list_experiments  List experiments for a subject
+  list_scans        List scans in an experiment
+  download_files    Download files
+  download_subject  Download all data for a subject
+  download_all      Download all subjects' data from a project
+  help              Display this help message
+
+Examples:
+  xnat_cli.R init
+  xnat_cli.R authenticate
+  xnat_cli.R list_projects
+  xnat_cli.R list_subjects --project_id TEST
+  xnat_cli.R download_files --project_id TEST --subject_id SUBJ1 --experiment_id EXP1 --scan_id ALL
+
+For detailed help on a command, use xnat_cli.R help <command>
+
+The script uses the xnatR package and relies on the configuration file ~/.xnatR_config.yml for stored credentials.
+")
+}
+
+# Parse options
+parse_options <- function(options) {
+  opt_list <- list()
+  i <- 1
+  while (i <= length(options)) {
+    if (grepl("^--", options[i])) {
+      key <- sub("^--", "", options[i])
+      i <- i + 1
+      if (i <= length(options) && !grepl("^--", options[i])) {
+        value <- options[i]
+        i <- i + 1
+      } else {
+        value <- TRUE  # For flags without value
+      }
+      opt_list[[key]] <- value
+    } else {
+      i <- i + 1
+    }
+  }
+  return(opt_list)
+}
+
+# Command functions
+init_command <- function(options) {
+  xnatR::initialize_config()
+}
+
+authenticate_command <- function(options) {
+  opts <- parse_options(options)
+  
+  base_url <- if (!is.null(opts$base_url)) opts$base_url else NULL
+  username <- if (!is.null(opts$username)) opts$username else NULL
+  password <- if (!is.null(opts$password)) opts$password else NULL
+  token <- if (!is.null(opts$token)) opts$token else NULL
+  ssl_verify <- if (!is.null(opts$ssl_verify)) as.logical(opts$ssl_verify) else TRUE
+  
+  xnatR::authenticate_xnat(base_url = base_url, username = username, password = password, token = token, ssl_verify = ssl_verify)
+}
+
+list_projects_command <- function(options) {
+  xnatR::authenticate_xnat(ssl_verify=FALSE)  # Ensure authenticated
+  projects <- xnatR::list_projects()
+  print(projects)
+}
+
+list_subjects_command <- function(options) {
+  opts <- parse_options(options)
+  if (is.null(opts$project_id)) {
+    cat("Error: --project_id is required for list_subjects\n")
+    quit(status = 1)
+  }
+  xnatR::authenticate_xnat(ssl_verify=FALSE)
+  subjects <- xnatR::list_subjects(project_id = opts$project_id)
+  print(subjects)
+}
+
+list_experiments_command <- function(options) {
+  opts <- parse_options(options)
+  if (is.null(opts$project_id) || is.null(opts$subject_id)) {
+    cat("Error: --project_id and --subject_id are required for list_experiments\n")
+    quit(status = 1)
+  }
+  xnatR::authenticate_xnat(ssl_verify=FALSE)
+  experiments <- xnatR::list_experiments(project_id = opts$project_id, subject_id = opts$subject_id)
+  print(experiments)
+}
+
+list_scans_command <- function(options) {
+  opts <- parse_options(options)
+  if (is.null(opts$project_id) || is.null(opts$subject_id) || is.null(opts$experiment_id)) {
+    cat("Error: --project_id, --subject_id, and --experiment_id are required for list_scans\n")
+    quit(status = 1)
+  }
+  xnatR::authenticate_xnat(ssl_verify=FALSE)
+  scans <- xnatR::list_scans(project_id = opts$project_id, subject_id = opts$subject_id, experiment_id = opts$experiment_id)
+  print(scans)
+}
+
+download_files_command <- function(options) {
+  opts <- parse_options(options)
+  required_opts <- c("project_id", "subject_id", "experiment_id")
+  missing_opts <- required_opts[!required_opts %in% names(opts)]
+  if (length(missing_opts) > 0) {
+    cat("Error: Missing required options:", paste(paste0("--", missing_opts), collapse = ", "), "\n")
+    quit(status = 1)
+  }
+  scan_id <- if (!is.null(opts$scan_id)) opts$scan_id else "ALL"
+  resource <- if (!is.null(opts$resource)) opts$resource else NULL
+  format <- if (!is.null(opts$format)) opts$format else "zip"
+  dest_dir <- if (!is.null(opts$dest_dir)) opts$dest_dir else getwd()
+  
+  xnatR::authenticate_xnat(ssl_verify=FALSE)
+  xnatR::download_files(
+    project_id = opts$project_id,
+    subject_id = opts$subject_id,
+    experiment_id = opts$experiment_id,
+    scan_id = scan_id,
+    resource = resource,
+    format = format,
+    dest_dir = dest_dir
+  )
+}
+
+download_subject_command <- function(options) {
+  opts <- parse_options(options)
+  required_opts <- c("project_id", "subject_id")
+  missing_opts <- required_opts[!required_opts %in% names(opts)]
+  if (length(missing_opts) > 0) {
+    cat("Error: Missing required options:", paste(paste0("--", missing_opts), collapse = ", "), "\n")
+    quit(status = 1)
+  }
+  format <- if (!is.null(opts$format)) opts$format else "zip"
+  dest_dir <- if (!is.null(opts$dest_dir)) opts$dest_dir else getwd()
+  
+  xnatR::authenticate_xnat(ssl_verify=FALSE)
+  xnatR::download_subject(
+    project_id = opts$project_id,
+    subject_id = opts$subject_id,
+    format = format,
+    dest_dir = dest_dir
+  )
+}
+
+download_all_command <- function(options) {
+  opts <- parse_options(options)
+  if (is.null(opts$project_id)) {
+    cat("Error: --project_id is required for download_all\n")
+    quit(status = 1)
+  }
+  format <- if (!is.null(opts$format)) opts$format else "zip"
+  dest_dir <- if (!is.null(opts$dest_dir)) opts$dest_dir else getwd()
+  
+  xnatR::authenticate_xnat(ssl_verify=FALSE)
+  xnatR::download_all_subjects(
+    project_id = opts$project_id,
+    format = format,
+    dest_dir = dest_dir
+  )
+}
+
+# Main script execution
+if (length(args) == 0 || args[1] == "help") {
+  print_help()
+  quit(status = 0)
+}
+
+command <- args[1]
+options <- args[-1]
+
+if (command == "init") {
+  init_command(options)
+} else if (command == "authenticate") {
+  authenticate_command(options)
+} else if (command == "list_projects") {
+  list_projects_command(options)
+} else if (command == "list_subjects") {
+  list_subjects_command(options)
+} else if (command == "list_experiments") {
+  list_experiments_command(options)
+} else if (command == "list_scans") {
+  list_scans_command(options)
+} else if (command == "download_files") {
+  download_files_command(options)
+} else if (command == "download_subject") {
+  download_subject_command(options)
+} else if (command == "download_all") {
+  download_all_command(options)
+} else {
+  cat("Unknown command: ", command, "\n")
+  print_help()
+  quit(status = 1)
+}
