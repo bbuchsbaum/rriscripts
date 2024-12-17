@@ -180,11 +180,11 @@ execute_qexec() {
     fi
     
     # Construct the qexec.sh command with conditional mem parameter
-    qexec_cmd="./qexec.sh --time ${time} --ncpus ${ncpus} --nodes ${nodes} --array=1-${nodes}"
+    qexec_cmd="~/bin/qexec.sh --time ${time} --ncpus ${ncpus} --nodes ${nodes} --array=1-${nodes}"
     if [[ -n "$mem" ]]; then
         qexec_cmd+=" --mem ${mem}"
     fi
-    qexec_cmd+=" ./command_distributor.sh ${commands_file} ${nodes} ${jobs}"
+    qexec_cmd+=" ~/bin/command_distributor.sh ${commands_file} ${nodes} ${jobs}"
     
     echo "Submitting array job with the following command:"
     echo "$qexec_cmd"
