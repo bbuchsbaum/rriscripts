@@ -65,11 +65,14 @@ while [[ "$#" -gt 0 ]]; do
         --nodes) NODES="$2"; shift ;;
         -j|--name) JOB_NAME="$2"; shift ;;
         -a|--array|--array) 
-            if [[ "$2" =~ ^[0-9-]+$ ]]; then
+            if [[ "$1" == *"="* ]]; then
+                ARRAY="${1#*=}"  # Extract value after equals sign
+            elif [[ -n "$2" && "$2" =~ ^[0-9-]+$ ]]; then
                 ARRAY="$2"
                 shift
             else
-                ARRAY="${1#*=}"  # Extract value after equals sign
+                echo "Error: Invalid array format: $1 $2"
+                usage
             fi
             ;;
         --account) ACCOUNT="$2"; shift ;;
@@ -118,6 +121,9 @@ else
         echo "$EXEC_CMD"
     } > "$JOB_SCRIPT"
     
+    echo "Debug: Contents of $JOB_SCRIPT:"
+    cat "$JOB_SCRIPT"
+    
     TIME_MINUTES=$((TIME * 60))
     SBATCH_ARGS=""
     [ -n "$ARRAY" ] && SBATCH_ARGS+=" --array=${ARRAY}"
@@ -128,6 +134,8 @@ else
     SBATCH_CMD="sbatch $SBATCH_ARGS $JOB_SCRIPT"
     echo "Debug: ARRAY=$ARRAY"
     echo "Debug: SBATCH_ARGS=$SBATCH_ARGS"
+    echo "Debug: Full command being executed:"
+    echo "$COMMAND"
     execute_command "$SBATCH_CMD"
     
     # Clean up temporary job script
