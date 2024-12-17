@@ -123,9 +123,9 @@ else
         echo "#!/bin/bash"
         echo "export OMP_NUM_THREADS=${OMP_NUM_THREADS}"
         echo "export MKL_NUM_THREADS=${OMP_NUM_THREADS}"
-        # Remove array parameter from command if present
-        EXEC_CMD=$(echo "$COMMAND" | sed 's/--array=[0-9-]*//')
-        echo "$EXEC_CMD"
+        # Clean up the command - remove any duplicate paths and array parameters
+        CLEAN_CMD=$(echo "$COMMAND" | sed 's/--array=[0-9-]*//' | sed 's|~/bin/command_distributor.sh ~/bin/command_distributor.sh|~/bin/command_distributor.sh|')
+        echo "$CLEAN_CMD"
     } > "$JOB_SCRIPT"
     
     echo "Debug: Contents of $JOB_SCRIPT:"
