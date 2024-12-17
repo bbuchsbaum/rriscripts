@@ -106,7 +106,9 @@ else
         echo "#!/bin/bash"
         echo "export OMP_NUM_THREADS=${OMP_NUM_THREADS}"
         echo "export MKL_NUM_THREADS=${OMP_NUM_THREADS}"
-        echo "$COMMAND"
+        # Remove array parameter from command if present
+        EXEC_CMD=$(echo "$COMMAND" | sed 's/--array=[0-9-]*//')
+        echo "$EXEC_CMD"
     } > "$JOB_SCRIPT"
     
     TIME_MINUTES=$((TIME * 60))
