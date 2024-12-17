@@ -64,14 +64,19 @@ while [[ "$#" -gt 0 ]]; do
         -n|--ncpus) NCPUS="$2"; shift ;;
         --nodes) NODES="$2"; shift ;;
         -j|--name) JOB_NAME="$2"; shift ;;
-        -a|--array|--array) 
-            if [[ "$1" == *"="* ]]; then
-                ARRAY="${1#*=}"  # Extract value after equals sign
-            elif [[ -n "$2" && "$2" =~ ^[0-9-]+$ ]]; then
+        -a|--array)
+            if [[ "$2" =~ ^[0-9-]+$ ]]; then
                 ARRAY="$2"
                 shift
             else
-                echo "Error: Invalid array format: $1 $2"
+                echo "Error: --array requires a valid range (e.g., 1-5)"
+                usage
+            fi
+            ;;
+        --array=*)
+            ARRAY="${1#--array=}"
+            if ! [[ "$ARRAY" =~ ^[0-9-]+$ ]]; then
+                echo "Error: --array requires a valid range (e.g., 1-5)"
                 usage
             fi
             ;;
@@ -79,7 +84,9 @@ while [[ "$#" -gt 0 ]]; do
         --nox11) NOX11=true ;;
         -o|--omp_num_threads) OMP_NUM_THREADS="$2"; shift ;;
         -h|--help) usage ;;
-        *) COMMAND="$*"; break ;;
+        --) shift; COMMAND="$*"; break ;;  # explicit end of options
+        -*) echo "Error: Unknown option: $1"; usage ;;
+        *) COMMAND="$1 $*"; break ;;  # start of command
     esac
     shift
 done
@@ -145,3 +152,11 @@ fi
 # Add near the start of the script, after argument parsing
 echo "Debug: Command line arguments received: $@"
 echo "Debug: After parsing: ARRAY='$ARRAY' COMMAND='$COMMAND'"
+
+# Add after argument parsing
+echo "Debug: Parsed arguments:"
+echo "  TIME=$TIME"
+echo "  NCPUS=$NCPUS"
+echo "  NODES=$NODES"
+echo "  ARRAY=$ARRAY"
+echo "  COMMAND=$COMMAND"
