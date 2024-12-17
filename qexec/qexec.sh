@@ -84,9 +84,9 @@ while [[ "$#" -gt 0 ]]; do
         --nox11) NOX11=true ;;
         -o|--omp_num_threads) OMP_NUM_THREADS="$2"; shift ;;
         -h|--help) usage ;;
-        --) shift; COMMAND="$*"; break ;;  # explicit end of options
+        --) shift; COMMAND="$*"; break ;;
         -*) echo "Error: Unknown option: $1"; usage ;;
-        *) COMMAND="$1 $*"; break ;;  # start of command
+        *) COMMAND="$*"; break ;;
     esac
     shift
 done
@@ -123,11 +123,8 @@ else
         echo "#!/bin/bash"
         echo "export OMP_NUM_THREADS=${OMP_NUM_THREADS}"
         echo "export MKL_NUM_THREADS=${OMP_NUM_THREADS}"
-        # First expand the home directory in the command
-        EXPANDED_CMD=$(echo "$COMMAND" | sed "s|~/bin|$HOME/bin|g")
-        # Then remove duplicates and array parameters
-        CLEAN_CMD=$(echo "$EXPANDED_CMD" | sed 's/--array=[0-9-]*//' | \
-            sed "s|$HOME/bin/command_distributor.sh $HOME/bin/command_distributor.sh|$HOME/bin/command_distributor.sh|")
+        # Expand home directory and clean up command
+        CLEAN_CMD=$(echo "$COMMAND" | sed "s|~/bin|$HOME/bin|g" | sed 's/--array=[0-9-]*//')
         echo "$CLEAN_CMD"
     } > "$JOB_SCRIPT"
     
