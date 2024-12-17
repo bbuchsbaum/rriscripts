@@ -64,7 +64,14 @@ while [[ "$#" -gt 0 ]]; do
         -n|--ncpus) NCPUS="$2"; shift ;;
         --nodes) NODES="$2"; shift ;;
         -j|--name) JOB_NAME="$2"; shift ;;
-        -a|--array) ARRAY="$2"; shift ;;
+        -a|--array|--array) 
+            if [[ "$2" =~ ^[0-9-]+$ ]]; then
+                ARRAY="$2"
+                shift
+            else
+                ARRAY="${1#*=}"  # Extract value after equals sign
+            fi
+            ;;
         --account) ACCOUNT="$2"; shift ;;
         --nox11) NOX11=true ;;
         -o|--omp_num_threads) OMP_NUM_THREADS="$2"; shift ;;
@@ -126,3 +133,7 @@ else
     # Clean up temporary job script
     trap 'rm -f "$JOB_SCRIPT"' EXIT
 fi
+
+# Add near the start of the script, after argument parsing
+echo "Debug: Command line arguments received: $@"
+echo "Debug: After parsing: ARRAY='$ARRAY' COMMAND='$COMMAND'"
