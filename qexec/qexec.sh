@@ -25,7 +25,7 @@
 # Default values
 TIME=1
 INTERACTIVE=false
-MEM="6G"
+MEM=""
 NCPUS=1
 NODES=1
 JOB_NAME=""
@@ -93,7 +93,8 @@ execute_command() {
 if [ "$INTERACTIVE" == "true" ]; then
     # Interactive job: use salloc
     TIME_MINUTES=$((TIME * 60))
-    SALLOC_CMD="salloc --time=${TIME_MINUTES} --account=${ACCOUNT} --cpus-per-task=${NCPUS} --nodes=${NODES} --mem=${MEM}"
+    SALLOC_CMD="salloc --time=${TIME_MINUTES} --account=${ACCOUNT} --cpus-per-task=${NCPUS} --nodes=${NODES}"
+    [ -n "$MEM" ] && SALLOC_CMD+=" --mem=${MEM}"
     if [ "$NOX11" == "false" ]; then
         SALLOC_CMD+=" --x11"
     fi
@@ -109,7 +110,8 @@ else
     } > "$JOB_SCRIPT"
     
     TIME_MINUTES=$((TIME * 60))
-    SBATCH_ARGS="--time=${TIME_MINUTES} --account=${ACCOUNT} --cpus-per-task=${NCPUS} --nodes=${NODES} --mem=${MEM}"
+    SBATCH_ARGS="--time=${TIME_MINUTES} --account=${ACCOUNT} --cpus-per-task=${NCPUS} --nodes=${NODES}"
+    [ -n "$MEM" ] && SBATCH_ARGS+=" --mem=${MEM}"
     [ -n "$JOB_NAME" ] && SBATCH_ARGS+=" --job-name=${JOB_NAME}"
     [ -n "$ARRAY" ] && SBATCH_ARGS+=" --array=${ARRAY}"
 
