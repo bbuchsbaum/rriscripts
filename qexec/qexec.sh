@@ -123,8 +123,11 @@ else
         echo "#!/bin/bash"
         echo "export OMP_NUM_THREADS=${OMP_NUM_THREADS}"
         echo "export MKL_NUM_THREADS=${OMP_NUM_THREADS}"
-        # Clean up the command - remove any duplicate paths and array parameters
-        CLEAN_CMD=$(echo "$COMMAND" | sed 's/--array=[0-9-]*//' | sed 's|~/bin/command_distributor.sh ~/bin/command_distributor.sh|~/bin/command_distributor.sh|')
+        # First expand the home directory in the command
+        EXPANDED_CMD=$(echo "$COMMAND" | sed "s|~/bin|$HOME/bin|g")
+        # Then remove duplicates and array parameters
+        CLEAN_CMD=$(echo "$EXPANDED_CMD" | sed 's/--array=[0-9-]*//' | \
+            sed "s|$HOME/bin/command_distributor.sh $HOME/bin/command_distributor.sh|$HOME/bin/command_distributor.sh|")
         echo "$CLEAN_CMD"
     } > "$JOB_SCRIPT"
     
