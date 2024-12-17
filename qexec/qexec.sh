@@ -112,12 +112,15 @@ else
     } > "$JOB_SCRIPT"
     
     TIME_MINUTES=$((TIME * 60))
-    SBATCH_ARGS="--time=${TIME_MINUTES} --account=${ACCOUNT} --cpus-per-task=${NCPUS} --nodes=${NODES}"
+    SBATCH_ARGS=""
+    [ -n "$ARRAY" ] && SBATCH_ARGS+=" --array=${ARRAY}"
+    SBATCH_ARGS+=" --time=${TIME_MINUTES} --account=${ACCOUNT} --cpus-per-task=${NCPUS} --nodes=${NODES}"
     [ -n "$MEM" ] && SBATCH_ARGS+=" --mem=${MEM}"
     [ -n "$JOB_NAME" ] && SBATCH_ARGS+=" --job-name=${JOB_NAME}"
-    [ -n "$ARRAY" ] && SBATCH_ARGS+=" --array=${ARRAY}"
 
     SBATCH_CMD="sbatch $SBATCH_ARGS $JOB_SCRIPT"
+    echo "Debug: ARRAY=$ARRAY"
+    echo "Debug: SBATCH_ARGS=$SBATCH_ARGS"
     execute_command "$SBATCH_CMD"
     
     # Clean up temporary job script
