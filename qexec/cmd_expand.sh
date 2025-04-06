@@ -48,47 +48,94 @@ set -e
 #########################
 
 usage() {
-    echo "Usage: $0 [--link] <base_command> [options and values]"
-    echo ""
-    echo "Arguments:"
-    echo "  --link             Optional flag to enable link mode (combines options by matching positions)."
-    echo "  <base_command>     The base command to be executed."
-    echo "  [options and values] Options and their corresponding values in a specific format."
-    echo ""
-    echo "Options can be specified as:"
-    echo "  -option [value1,value2,...]        Option with multiple values."
-    echo "  [value1,value2,...]                Unnamed arguments (without option flags)."
-    echo ""
-    echo "Special prefixes for values:"
-    echo "  file:<filename>    Reads values from the specified file, one per line."
-    echo "  df:<column>:<file> Reads values from the specified column in a CSV file."
-    echo "  glob:<pattern>     Expands to match files using the specified glob pattern."
-    echo ""
-    echo "Use '$0 --help' to display detailed examples."
+    cat <<EOF
+Usage: $0 [--link] <base_command> [arguments...]
+
+Generates a list of commands by expanding combinations of provided arguments.
+Arguments can be named options (e.g., -f file.txt) or unnamed values.
+
+Modes:
+  Default: Generates the Cartesian product (all possible combinations) of values.
+  --link:  Links arguments by position. Combines the first value of each argument,
+           then the second, and so on. If lists have different lengths, the last
+           item of shorter lists is repeated.
+
+Arguments:
+  <base_command>     The command prefix for each generated line.
+  [arguments...]     One or more arguments. These can be:
+
+    Named Options:
+      -opt [value_spec]  An option flag followed by its value specification.
+                         Example: -input [file1.txt,file2.txt]
+
+    Unnamed Arguments:
+      value_spec         A value specification without an option flag.
+                         Example: [1,2,3] or just literal_value
+
+Value Specification ([value_spec]):
+  - Must be enclosed in square brackets [] to enable expansion.
+  - Literal values (not in []) are treated as a single item.
+  - Inside brackets, values can be:
+      val1,val2,...    Comma-separated values.
+      N..M or N:M      An inclusive integer range (e.g., 1..5, -3..3).
+      file:<filename>  Values read line-by-line from <filename>.
+      df:<col>:<file>  Values read from CSV <file>'s column <col>.
+      glob:<pattern>   Files matching the shell <pattern> (e.g., *.txt).
+
+Shell Quoting:
+  IMPORTANT: Arguments containing special characters ([, ], *, etc.)
+  must be quoted or escaped in your shell (especially zsh) to prevent
+  unintended expansion before they reach this script.
+  Example: $0 cmd '[1,2]' 'glob:*.csv' or $0 cmd "[1,2]" "glob:*.csv"
+
+Use '$0 --help' for detailed examples.
+EOF
     exit 1
 }
 
 detailed_help() {
+    # Display basic usage first
     usage
-    echo ""
-    echo "Examples:"
-    echo "  1. Basic Usage Without Link Mode"
-    echo "     $0 \"echo\" -a \"[1,2,3]\" \"file:values.txt\""
-    echo ""
-    echo "  2. Using the '--link' Flag"
-    echo "     $0 --link \"echo\" -a \"[1,2,3]\" \"file:values.txt\""
-    echo ""
-    echo "  3. Using Data Frame Input"
-    echo "     $0 \"run_analysis\" -p \"df:param:data.csv\" -d \"10,20\""
-    echo ""
-    echo "  4. Using Glob Patterns"
-    echo "     $0 \"process_files\" \"glob:*.txt\" -v \"fast,slow\""
-    echo ""
-    echo "  5. Combining Multiple Options"
-    echo "     $0 \"deploy\" -e \"dev,prod\" -t \"us,eu\" \"file:services.txt\""
-    echo ""
-    echo "  6. Handling Unequal Lengths with '--link'"
-    echo "     $0 --link \"backup\" -s \"daily,weekly,monthly\" \"file:directories.txt\""
+
+    # Add detailed examples
+    cat <<EOF
+
+Examples:
+
+  1. Basic Cartesian Product:
+     # Generates: command -a 1 x, command -a 1 y, command -a 2 x, command -a 2 y
+     $0 command -a '[1,2]' '[x,y]'
+
+  2. Unnamed Arguments & Range:
+     # Generates: process 1 -5, process 1 -4, ..., process 1 0, ..., process 3 5
+     $0 process '[1..3]' '[-5..5]'
+
+  3. Using File Input:
+     # Reads values for -s from servers.txt and combines with env values
+     $0 deploy -s '[file:servers.txt]' -e '[dev,prod]'
+
+  4. Using Glob Pattern (Remember to Quote!):
+     # Processes each .log file found
+     $0 analyze '[glob:*.log]'
+
+  5. Using CSV Data Frame:
+     # Reads 'subject_id' column from data.csv
+     $0 run_trial -s '[df:subject_id:data.csv]' -t '[fast,slow]'
+
+  6. Link Mode (--link):
+     # Generates: task -f file1.txt -p A, task -f file2.txt -p B, task -f file3.txt -p C
+     $0 --link task -f '[file1.txt,file2.txt,file3.txt]' -p '[A,B,C]'
+
+  7. Link Mode with Uneven Lists:
+     # Generates: backup src1 daily, backup src2 weekly, backup src3 monthly, backup src4 monthly
+     # Note: 'monthly' is repeated for the last item.
+     $0 --link backup '[src1,src2,src3,src4]' '[daily,weekly,monthly]'
+
+  8. Literal Unnamed Argument:
+     # Generates: setup main_db primary, setup main_db replica
+     $0 setup main_db '[primary,replica]'
+
+EOF
     exit 0
 }
 
