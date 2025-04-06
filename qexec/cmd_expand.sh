@@ -145,8 +145,8 @@ parse_option_values() {
         fi
         values=("${files[@]}")
     else
-        # Check for range expansion (e.g. 1..100 or 1:100)
-        if [[ "$value_str" =~ ^([0-9]+)(\.\.|:)([0-9]+)$ ]]; then
+        # Check for range expansion (e.g. 1..100 or 1:100 or -5..5)
+        if [[ "$value_str" =~ ^(-?[0-9]+)(\.\.|:)(-?[0-9]+)$ ]]; then
             start=${BASH_REMATCH[1]}
             end=${BASH_REMATCH[3]}
             if (( start <= end )); then
@@ -276,7 +276,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -*)
-            # This is an option, let’s push it to raw_options to handle after
+            # This is an option, let's push it to raw_options to handle after
             raw_options+=("$1")
             shift
             if [[ $# -gt 0 && ! "$1" =~ ^- ]]; then
@@ -321,26 +321,22 @@ while (( i < ${#raw_options[@]} )); do
 done
 
 # Parse unnamed arguments
-# Each unnamed argument might contain multiple values or expansions
-# Combine them as if they are another "option" with no name
+# Each unnamed argument source is treated as a separate option without a name
 if (( ${#unnamed_raw_values[@]} > 0 )); then
-    # We treat all unnamed values collectively as a single argument list
-    # If you want them separate, you can adjust code to handle them separately
-    all_unnamed=()
     for uval in "${unnamed_raw_values[@]}"; do
-        parsed_values=$(parse_option_values "$uval")
-        # Append all expansions
-        for v in $parsed_values; do
-            all_unnamed+=("$v")
-        done
-    done
+        # Check if the argument is wrapped in [] for expansion
+        if [[ "$uval" == \[* && "$uval" == *\] ]]; then
+            parsed_values=$(parse_option_values "$uval")
+        else
+            # Treat as a literal value
+            parsed_values="$uval"
+        fi
 
-    if (( ${#all_unnamed[@]} > 0 )); then
-        # Treat unnamed args as if they were an "option" with empty name
-        # This simplifies combining logic
-        option_names+=("")
-        option_values+=("$(echo "${all_unnamed[@]}")")
-    fi
+        if [[ -n "$parsed_values" ]]; then # Ensure we don't add empty sets
+            option_names+=("")
+            option_values+=("$parsed_values")
+        fi
+    done
 fi
 
 if $LINK_MODE; then
