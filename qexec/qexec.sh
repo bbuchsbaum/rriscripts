@@ -56,40 +56,93 @@ usage() {
 }
 
 # Parse arguments
-while [[ "$#" -gt 0 ]]; do
-    case $1 in
-        -t|--time) TIME="$2"; shift ;;
-        -i|--interactive) INTERACTIVE=true ;;
-        -m|--mem) MEM="$2"; shift ;;
-        -n|--ncpus) NCPUS="$2"; shift ;;
-        --nodes) NODES="$2"; shift ;;
-        -j|--name) JOB_NAME="$2"; shift ;;
-        -a|--array)
-            if [[ "$2" =~ ^[0-9-]+$ ]]; then
-                ARRAY="$2"
-                shift
-            else
-                echo "Error: --array requires a valid range (e.g., 1-5)"
-                usage
-            fi
-            ;;
-        --array=*)
-            ARRAY="${1#--array=}"
-            if ! [[ "$ARRAY" =~ ^[0-9-]+$ ]]; then
-                echo "Error: --array requires a valid range (e.g., 1-5)"
-                usage
-            fi
-            ;;
-        --account) ACCOUNT="$2"; shift ;;
-        --nox11) NOX11=true ;;
-        -o|--omp_num_threads) OMP_NUM_THREADS="$2"; shift ;;
-        -h|--help) usage ;;
-        --) shift; COMMAND="$*"; break ;;
-        -*) echo "Error: Unknown option: $1"; usage ;;
-        *) COMMAND="$*"; break ;;
-    esac
-    shift
-done
+# Check if enhanced getopt is available
+if getopt --test > /dev/null; then
+    # Use enhanced getopt for robust parsing
+    SHORT_OPTS="t:im:n:j:a:o:h"
+    LONG_OPTS="time:,interactive,mem:,ncpus:,nodes:,name:,array:,account:,nox11,omp_num_threads:,help"
+    PARSED_OPTIONS=$(getopt --options $SHORT_OPTS --longoptions $LONG_OPTS --name "$0" -- "$@")
+    if [[ $? -ne 0 ]]; then
+        usage
+    fi
+    eval set -- "$PARSED_OPTIONS"
+
+    while true; do
+        case "$1" in
+            -t|--time)
+                TIME="$2"; shift 2 ;;
+            -i|--interactive)
+                INTERACTIVE=true; shift ;;
+            -m|--mem)
+                MEM="$2"; shift 2 ;;
+            -n|--ncpus)
+                NCPUS="$2"; shift 2 ;;
+            --nodes)
+                NODES="$2"; shift 2 ;;
+            -j|--name)
+                JOB_NAME="$2"; shift 2 ;;
+            -a|--array)
+                 if [[ "$2" =~ ^[0-9]+(-[0-9]+)?(%[0-9]+)?$ ]]; then
+                     ARRAY="$2"; shift 2
+                 else
+                     echo "Error: --array requires a valid range (e.g., 1-5 or 1-10%2)" >&2
+                     usage
+                 fi
+                 ;;
+            --account)
+                ACCOUNT="$2"; shift 2 ;;
+            --nox11)
+                NOX11=true; shift ;;
+            -o|--omp_num_threads)
+                OMP_NUM_THREADS="$2"; shift 2 ;;
+            -h|--help)
+                usage ;;
+            --)
+                shift; COMMAND="$@"; break ;;
+            *)
+                echo "Internal error! Unexpected option: $1" >&2; exit 1 ;;
+        esac
+    done
+else
+    # Fallback to basic manual parsing if enhanced getopt is not available
+    echo "Warning: Enhanced getopt not found. Using basic argument parsing." >&2
+    while [[ "$#" -gt 0 ]]; do
+        case $1 in
+            -t|--time) TIME="$2"; shift ;;       # Note: Original shift logic retained for fallback
+            -i|--interactive) INTERACTIVE=true ;; # Note: Original shift logic retained for fallback
+            -m|--mem) MEM="$2"; shift ;;          # Note: Original shift logic retained for fallback
+            -n|--ncpus) NCPUS="$2"; shift ;;       # Note: Original shift logic retained for fallback
+            --nodes) NODES="$2"; shift ;;       # Note: Original shift logic retained for fallback
+            -j|--name) JOB_NAME="$2"; shift ;;    # Note: Original shift logic retained for fallback
+            -a|--array)
+                if [[ "$2" =~ ^[0-9]+(-[0-9]+)?(%[0-9]+)?$ ]]; then # Use updated regex for consistency
+                    ARRAY="$2"
+                    shift
+                else
+                    echo "Error: --array requires a valid range (e.g., 1-5 or 1-10%2)" >&2
+                    usage
+                fi
+                ;;
+            --array=*)
+                ARRAY_VAL="${1#--array=}"
+                if [[ "$ARRAY_VAL" =~ ^[0-9]+(-[0-9]+)?(%[0-9]+)?$ ]]; then # Use updated regex for consistency
+                    ARRAY="$ARRAY_VAL"
+                else
+                    echo "Error: --array requires a valid range (e.g., 1-5 or 1-10%2)" >&2
+                    usage
+                fi
+                ;;
+            --account) ACCOUNT="$2"; shift ;;   # Note: Original shift logic retained for fallback
+            --nox11) NOX11=true ;;             # Note: Original shift logic retained for fallback
+            -o|--omp_num_threads) OMP_NUM_THREADS="$2"; shift ;; # Note: Original shift logic retained for fallback
+            -h|--help) usage ;;
+            --) shift; COMMAND="$*"; break ;;
+            -*) echo "Error: Unknown option: $1"; usage ;;
+            *) COMMAND="$*"; break ;;
+        esac
+        shift # Note: Original shift logic retained for fallback
+    done
+fi
 
 # Validate required arguments
 if [ -z "$COMMAND" ] && [ "$INTERACTIVE" == "false" ]; then
@@ -125,7 +178,10 @@ else
         echo "export MKL_NUM_THREADS=${OMP_NUM_THREADS}"
         # Expand home directory and clean up command
         CLEAN_CMD=$(echo "$COMMAND" | sed "s|~/bin|$HOME/bin|g" | sed 's/--array=[0-9-]*//')
-        echo "$CLEAN_CMD"
+        # Use eval to execute the command string, preserving special characters
+        # Single quotes prevent premature expansion in the here-doc/echo context
+        # Double quotes around $CLEAN_CMD inside eval allow variable expansion *within* the command on the node
+        echo 'eval "'$CLEAN_CMD'"'
     } > "$JOB_SCRIPT"
     
     echo "Debug: Contents of $JOB_SCRIPT:"
