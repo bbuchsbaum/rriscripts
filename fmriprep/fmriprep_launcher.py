@@ -6,6 +6,9 @@ One-stop tool to build correct fMRIPrep commands and generate a Slurm array
 script for a BIDS dataset. Supports Singularity/Apptainer, the fmriprep-docker
 wrapper, and plain Docker. Includes an interactive "wizard" and CLI subcommands.
 
+For the best wizard experience with tab completion, install questionary:
+  pip install --user questionary
+
 Subcommands
 -----------
 - probe         : Show detected container runtime and available fMRIPrep images
@@ -704,8 +707,31 @@ def cmd_wizard(_args):
     # Optional interactive flow; Questionary if available, else text input.
     try:
         import questionary
-    except Exception:
+    except ImportError:
         questionary = None
+        print("=" * 60)
+        print("📦 'questionary' package not found!")
+        print("This provides a better interface with tab completion.")
+        print("\nTo install it, run one of:")
+        print("  pip install questionary")
+        print("  pip install --user questionary")
+        print("  conda install -c conda-forge questionary")
+        print("\nTrying automatic installation...")
+        print("=" * 60)
+        
+        # Try to install questionary automatically
+        import subprocess
+        import sys
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", "questionary"])
+            print("✅ Successfully installed questionary!")
+            print("Please restart the wizard to use the improved interface.")
+            sys.exit(0)
+        except subprocess.CalledProcessError:
+            print("\n⚠️  Automatic installation failed.")
+            print("Continuing with basic interface (no tab completion)...")
+            print("=" * 60 + "\n")
+            questionary = None
 
     def ask(prompt, default=None, validate=None, choices=None, path=False):
         if questionary:
@@ -717,8 +743,25 @@ def cmd_wizard(_args):
                 return questionary.text(prompt, default=default, validate=validate).ask()
             return questionary.text(prompt, default=default).ask()
         else:
-            val = input(f"{prompt} [{default if default else ''}]: ").strip()
-            return val or default
+            # Without questionary, provide basic choice display and input
+            if choices:
+                print(f"\n{prompt}")
+                for i, choice in enumerate(choices, 1):
+                    print(f"  {i}. {choice}")
+                while True:
+                    val = input(f"Enter choice number (1-{len(choices)}) [{default if default else ''}]: ").strip()
+                    if not val and default:
+                        return default
+                    try:
+                        idx = int(val) - 1
+                        if 0 <= idx < len(choices):
+                            return choices[idx]
+                    except (ValueError, IndexError):
+                        pass
+                    print(f"Invalid choice. Please enter a number between 1 and {len(choices)}")
+            else:
+                val = input(f"{prompt} [{default if default else ''}]: ").strip()
+                return val or default
 
     # BIDS
     bids = Path(ask("BIDS dataset path", default=str(Path.cwd()), path=True)).expanduser()
