@@ -172,8 +172,7 @@ SLURM_TEMPLATE = """\
 #SBATCH --partition={partition}
 #SBATCH --time={time}
 #SBATCH --cpus-per-task={cpus}
-#SBATCH --mem={mem}
-#SBATCH --nodes=1
+{mem_line}#SBATCH --nodes=1
 #SBATCH --array=0-{array_max}
 #SBATCH --output={log_dir}/%x_%A_%a.out
 #SBATCH --error={log_dir}/%x_%A_%a.err
@@ -401,7 +400,24 @@ echo "Running fMRIPrep on {len(selected)} subject(s): {' '.join(selected)}"
 
         partition = questionary.text("Slurm partition:", default=os.environ.get("SLURM_JOB_PARTITION", "compute")).ask()
         walltime = questionary.text("Walltime (HH:MM:SS):", default="24:00:00").ask()
-        mem_slurm = questionary.text("Slurm --mem (e.g., 32G):", default=human_mb(mem_mb)).ask()
+        
+        # Ask about memory specification
+        use_mem = questionary.confirm("Specify memory limit? (select No for Trillium cluster)", default=True).ask()
+        if use_mem:
+            mem_slurm = questionary.text("Slurm --mem (e.g., 32G):", default=human_mb(mem_mb)).ask()
+            mem_line = f"#SBATCH --mem={mem_slurm}\n"
+        else:
+            mem_line = ""
+            
+        # Ask about log directory  
+        default_log_dir = str(job_dir / "logs")
+        log_dir_path = questionary.path(
+            "Log directory (use scratch path for Trillium, not /project):", 
+            default=default_log_dir
+        ).ask()
+        log_dir = Path(log_dir_path).expanduser()
+        ensure_dir(log_dir)
+        
         account = questionary.text("Slurm account (optional):", default="").ask()
         email = questionary.text("Notification email (optional):", default="").ask()
         mail_type = questionary.text("Mail type (e.g. END,FAIL) (optional):", default="").ask()
@@ -418,9 +434,9 @@ echo "Running fMRIPrep on {len(selected)} subject(s): {' '.join(selected)}"
             partition=partition,
             time=walltime,
             cpus=nprocs,
-            mem=mem_slurm,
+            mem_line=mem_line,  # Use mem_line instead of mem
             array_max=max(0, len(selected)-1),
-            log_dir=str(ensure_dir(job_dir / "logs")),
+            log_dir=str(log_dir),  # Use the selected log_dir
             account=(f"#SBATCH --account={account}\n" if account else ""),
             mail=mail_block,
             bids=str(bids_dir),

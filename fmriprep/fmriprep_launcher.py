@@ -265,8 +265,7 @@ SLURM_TEMPLATE = """\
 #SBATCH --partition={partition}
 #SBATCH --time={time}
 #SBATCH --cpus-per-task={cpus_per_task}
-#SBATCH --mem={mem}
-#SBATCH --nodes=1
+{mem_line}#SBATCH --nodes=1
 #SBATCH --array=0-{array_max}
 #SBATCH --output={log_dir}/%x_%A_%a.out
 #SBATCH --error={log_dir}/%x_%A_%a.err
@@ -365,7 +364,7 @@ def create_slurm_script(
     partition: str,
     time: str,
     cpus_per_task: int,
-    mem: str,
+    mem: Optional[str],  # Make mem optional
     account: Optional[str],
     email: Optional[str],
     mail_type: Optional[str],
@@ -386,13 +385,18 @@ def create_slurm_script(
         if mail_type:
             mail_line += f"#SBATCH --mail-type={mail_type}\n"
     module_line = "module load singularity\n" if module_singularity and cfg.container_runtime == "singularity" else ""
+    
+    # Handle memory line - omit if mem is None or "none"
+    mem_line = ""
+    if mem and mem.lower() != "none":
+        mem_line = f"#SBATCH --mem={mem}\n"
 
     text = SLURM_TEMPLATE.format(
         job_name=job_name,
         partition=partition,
         time=time,
         cpus_per_task=cpus_per_task,
-        mem=mem,
+        mem_line=mem_line,  # Use mem_line instead of mem
         array_max=array_max,
         log_dir=str(log_dir),
         account_line=account_line,
@@ -557,8 +561,20 @@ def cmd_slurm_array(args):
     subj_file = out_dir / "subjects.txt"
     subj_file.write_text("\n".join(subjects) + "\n")
 
-    log_dir = out_dir / "logs"
-    log_dir.mkdir(exist_ok=True)
+    # Handle log directory override
+    if args.log_dir:
+        log_dir = args.log_dir.expanduser().resolve()
+    else:
+        log_dir = out_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    # Handle memory specification
+    if args.no_mem:
+        mem_spec = None
+    elif args.mem and args.mem.lower() == "none":
+        mem_spec = None
+    else:
+        mem_spec = args.mem or mb_to_human(mem_mb)
 
     text = create_slurm_script(
         cfg=cfg,
@@ -566,7 +582,7 @@ def cmd_slurm_array(args):
         partition=args.partition,
         time=args.time,
         cpus_per_task=args.cpus_per_task or nprocs,
-        mem=args.mem or mb_to_human(mem_mb),
+        mem=mem_spec,
         account=args.account,
         email=args.email,
         mail_type=args.mail_type,
@@ -692,21 +708,34 @@ def cmd_wizard(_args):
         partition = ask("Slurm partition", default=os.environ.get("SLURM_JOB_PARTITION", "compute"))
         time = ask("Walltime (HH:MM:SS)", default="24:00:00")
         cpus_per_task = int(ask("cpus-per-task", default=str(nprocs)))
-        mem = ask("Slurm mem (e.g. 32G)", default=mb_to_human(mem_mb))
+        
+        # Ask about memory specification
+        use_mem = ask("Specify memory limit? (y/n - select 'n' for Trillium)", choices=["y","n"]) == "y"
+        if use_mem:
+            mem = ask("Slurm mem (e.g. 32G)", default=mb_to_human(mem_mb))
+        else:
+            mem = None
+            
         account = ask("Slurm account (optional)", default="") or None
         email = ask("Email for notifications (optional)", default="") or None
         mail_type = ask("Mail type (e.g. END,FAIL) (optional)", default="") or None
         job_name = ask("Job name", default="fmriprep")
+        
+        # Ask about log directory
+        default_log = str(outdir / "logs")
+        log_dir_str = ask("Log directory (use scratch path for Trillium)", default=default_log, path=True)
+        log_dir = Path(log_dir_str).expanduser()
+        
         module_singularity = ask("Insert 'module load singularity'? (y/n)", choices=["y","n"]) == "y"
 
         script_text = create_slurm_script(
             cfg=cfg, subject_file=subj_file, partition=partition, time=time,
             cpus_per_task=cpus_per_task, mem=mem, account=account, email=email,
-            mail_type=mail_type, log_dir=outdir / "logs", module_singularity=module_singularity,
+            mail_type=mail_type, log_dir=log_dir, module_singularity=module_singularity,
             job_name=job_name
         )
         script_path = outdir / "fmriprep_array.sbatch"
-        (outdir / "logs").mkdir(exist_ok=True)
+        log_dir.mkdir(parents=True, exist_ok=True)
         script_path.write_text(script_text)
         os.chmod(script_path, 0o755)
         print(f"\nWrote Slurm script: {script_path}\nSubmit with:\n  sbatch {script_path}")
@@ -734,12 +763,14 @@ def main():
     p_slurm.add_argument("--partition", default="compute")
     p_slurm.add_argument("--time", default="24:00:00", help="Walltime, e.g. 24:00:00")
     p_slurm.add_argument("--cpus-per-task", type=int, default=None)
-    p_slurm.add_argument("--mem", default=None, help="Slurm memory request (e.g. 32G). Default: based on mem-mb")
+    p_slurm.add_argument("--mem", default=None, help="Slurm memory request (e.g. 32G). Default: based on mem-mb. Use 'none' to omit --mem")
     p_slurm.add_argument("--account", default=None)
     p_slurm.add_argument("--email", default=None)
     p_slurm.add_argument("--mail-type", default=None)
     p_slurm.add_argument("--job-name", default="fmriprep")
     p_slurm.add_argument("--module-singularity", action="store_true", help="Insert 'module load singularity' in script")
+    p_slurm.add_argument("--log-dir", type=Path, default=None, help="Override log directory (default: script-outdir/logs)")
+    p_slurm.add_argument("--no-mem", action="store_true", help="Omit --mem specification (for Trillium cluster)")
     p_slurm.set_defaults(func=cmd_slurm_array)
 
     # wizard
