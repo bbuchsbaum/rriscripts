@@ -462,12 +462,27 @@ def add_common_args(p: argparse.ArgumentParser):
 
 def choose_container(runtime: str, container_arg: str) -> str:
     if container_arg != "auto":
+        # For singularity, validate it's a file not a directory
+        if runtime == "singularity":
+            container_path = Path(container_arg).expanduser()
+            if container_path.is_dir():
+                # Try to find a .sif/.simg in the directory
+                images = discover_sif_images(str(container_path))
+                if images:
+                    # Return the most recent one
+                    latest = sorted(images, key=lambda p: Path(p).stat().st_mtime, reverse=True)[0]
+                    return str(latest)
+                else:
+                    raise RuntimeError(f"No .sif/.simg files found in directory: {container_path}")
+            elif not container_path.exists():
+                raise RuntimeError(f"Container file does not exist: {container_path}")
         return container_arg
+    
     if runtime == "singularity":
         sif_dir = os.environ.get("FMRIPREP_SIF_DIR")
         images = discover_sif_images(sif_dir)
         if images:
-            latest = sorted(images, key=lambda p: p.stat().st_mtime, reverse=True)[0]
+            latest = sorted(images, key=lambda p: Path(p).stat().st_mtime, reverse=True)[0]
             return str(latest)
         raise RuntimeError("No fMRIPrep .sif/.simg found. Set FMRIPREP_SIF_DIR or pass --container /path/file.sif")
     elif runtime in ("docker", "fmriprep-docker"):
@@ -533,8 +548,13 @@ def cmd_probe(_args):
 
 def cmd_print(args):
     subjects, runtime, container, fs_license, omp_threads, nprocs, mem_mb = fill_defaults(args)
+    # Use resolved paths from fill_defaults
+    bids = args.bids.expanduser().resolve()
+    out = args.out.expanduser().resolve()
+    work = args.work.expanduser().resolve()
+    
     cfg = BuildConfig(
-        bids=args.bids, out=args.out, work=args.work, subjects=subjects,
+        bids=bids, out=out, work=work, subjects=subjects,
         container_runtime=runtime, container=str(container),
         fs_license=fs_license, omp_threads=omp_threads, nprocs=nprocs, mem_mb=mem_mb,
         extra=args.extra, skip_bids_validation=args.skip_bids_validation,
@@ -547,8 +567,13 @@ def cmd_print(args):
 
 def cmd_slurm_array(args):
     subjects, runtime, container, fs_license, omp_threads, nprocs, mem_mb = fill_defaults(args)
+    # Use resolved paths from fill_defaults
+    bids = args.bids.expanduser().resolve()
+    out = args.out.expanduser().resolve()
+    work = args.work.expanduser().resolve()
+    
     cfg = BuildConfig(
-        bids=args.bids, out=args.out, work=args.work, subjects=subjects,
+        bids=bids, out=out, work=work, subjects=subjects,
         container_runtime=runtime, container=str(container),
         fs_license=fs_license, omp_threads=omp_threads, nprocs=nprocs, mem_mb=mem_mb,
         extra=args.extra, skip_bids_validation=args.skip_bids_validation,
