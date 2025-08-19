@@ -1,0 +1,743 @@
+#!/usr/bin/env python3
+"""
+fmriprep_launcher.py
+
+One-stop tool to build correct fMRIPrep commands and generate a Slurm array
+script for a BIDS dataset. Supports Singularity/Apptainer, the fmriprep-docker
+wrapper, and plain Docker. Includes an interactive "wizard" and CLI subcommands.
+
+Subcommands
+-----------
+- probe         : Show detected container runtime and available fMRIPrep images
+- print-cmd     : Print per-subject fMRIPrep commands (no submission)
+- slurm-array   : Generate Slurm array script + subject list
+- wizard        : Interactive setup (questionary if available, else basic prompts)
+
+Environment
+-----------
+- FMRIPREP_SIF_DIR: directory containing one or more *.sif/*.simg fMRIPrep images
+- FS_LICENSE       : path to FreeSurfer license file (overrides --fs-license)
+- SINGULARITY_BIND : extra bind mounts (comma-separated), if your site uses this
+"""
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+
+# ---------------------------- Utilities ----------------------------
+
+def which(cmd: str) -> Optional[str]:
+    return shutil.which(cmd)
+
+def run_cmd(cmd: List[str], check=False) -> Tuple[int, str, str]:
+    """Run a command and capture (returncode, stdout, stderr)."""
+    try:
+        proc = subprocess.run(cmd, check=check, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        return proc.returncode, proc.stdout, proc.stderr
+    except Exception as e:
+        return 1, "", str(e)
+
+def mb_to_human(mb: int) -> str:
+    """Convert integer MB to Slurm-friendly string."""
+    if mb >= 1_000_000:
+        return f"{mb/1_000_000:.1f}T"
+    if mb >= 1000:
+        return f"{mb/1000:.1f}G"
+    return f"{mb}M"
+
+def read_meminfo_mb() -> int:
+    """Rough system memory from /proc/meminfo in MB."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    parts = line.split()
+                    kb = int(parts[1])  # kB
+                    return kb // 1024
+    except Exception:
+        pass
+    return 16000  # fallback 16 GB
+
+def default_resources_from_env() -> Tuple[int, int]:
+    """
+    Return (cpus, mem_mb) from Slurm env or system.
+    Leaves ~10% headroom for safety.
+    """
+    cpus = int(os.environ.get("SLURM_CPUS_PER_TASK", os.environ.get("SLURM_CPUS_ON_NODE", "0")) or 0)
+    mem_mb = 0
+    if "SLURM_MEM_PER_CPU" in os.environ and cpus > 0:
+        mem_mb = int(os.environ["SLURM_MEM_PER_CPU"]) * cpus
+    elif "SLURM_MEM_PER_NODE" in os.environ:
+        mem_mb = int(os.environ["SLURM_MEM_PER_NODE"])
+
+    if cpus <= 0:
+        cpus = os.cpu_count() or 4
+    if mem_mb == 0:
+        mem_mb = read_meminfo_mb()
+
+    mem_mb = int(mem_mb * 0.9)
+    return cpus, mem_mb
+
+def detect_runtime(prefer: str = "auto") -> str:
+    """
+    Determine container runtime: 'singularity', 'fmriprep-docker', or 'docker'.
+    Treat Apptainer as 'singularity'.
+    """
+    if prefer in ("singularity", "docker", "fmriprep-docker"):
+        return prefer
+    if which("singularity") or which("apptainer"):
+        return "singularity"
+    if which("fmriprep-docker"):
+        return "fmriprep-docker"
+    if which("docker"):
+        return "docker"
+    raise RuntimeError("No container runtime found. Install Singularity/Apptainer, fmriprep-docker, or Docker.")
+
+def discover_sif_images(search_dir: Optional[str]) -> List[Path]:
+    """Return fMRIPrep .sif/.simg images from a directory (non-recursive)."""
+    candidates: List[Path] = []
+    if search_dir:
+        d = Path(search_dir).expanduser()
+        if d.is_dir():
+            for p in d.iterdir():
+                if p.suffix.lower() in (".sif", ".simg") and "fmriprep" in p.name.lower():
+                    candidates.append(p)
+    return sorted(candidates)
+
+def docker_list_fmriprep_images() -> List[str]:
+    """Return local docker image:tag strings for fmriprep."""
+    if not which("docker"):
+        return []
+    rc, out, _ = run_cmd(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"])
+    if rc != 0:
+        return []
+    lines = [l.strip() for l in out.splitlines() if l.strip()]
+    return [l for l in lines if re.match(r"^(nipreps|poldracklab|fmriprep)/fmriprep(:|$)", l)]
+
+def parse_participants_tsv(bids: Path) -> List[str]:
+    tsv = bids / "participants.tsv"
+    subs: List[str] = []
+    if tsv.exists():
+        with open(tsv, "r", newline="") as f:
+            header = f.readline().strip().split("\t")
+            if not header:
+                return subs
+            # Use 'participant_id' if present, else first column
+            if "participant_id" in header:
+                idx = header.index("participant_id")
+            else:
+                idx = 0
+            for line in f:
+                cols = line.strip().split("\t")
+                if len(cols) > idx:
+                    sub = cols[idx].strip()
+                    if not sub:
+                        continue
+                    subs.append(sub if sub.startswith("sub-") else f"sub-{sub}")
+    return sorted(list(dict.fromkeys(subs)))
+
+def scan_bids_for_subjects(bids: Path) -> List[str]:
+    return sorted([p.name for p in bids.iterdir() if p.is_dir() and p.name.startswith("sub-")])
+
+def discover_subjects(bids: Path) -> List[str]:
+    subs = parse_participants_tsv(bids)
+    return subs if subs else scan_bids_for_subjects(bids)
+
+
+# ---------------------------- Command builder ----------------------------
+
+@dataclass
+class BuildConfig:
+    bids: Path
+    out: Path
+    work: Path
+    subjects: List[str]
+    container_runtime: str
+    container: str  # .sif path for singularity, image:tag for docker
+    fs_license: Path
+    omp_threads: int
+    nprocs: int
+    mem_mb: int
+    extra: str
+    skip_bids_validation: bool
+    output_spaces: Optional[str]
+    use_aroma: bool
+    cifti_output: bool
+    fs_reconall: bool
+    use_syn_sdc: bool
+
+def build_fmriprep_command(cfg: BuildConfig, subject: str) -> List[str]:
+    """
+    Construct the full fMRIPrep command for one subject.
+    """
+    label = subject.replace("sub-", "")
+    base_cli = [
+        "participant",
+        "--participant-label", label,
+        "--nprocs", str(cfg.nprocs),
+        "--omp-nthreads", str(cfg.omp_threads),
+        "--mem-mb", str(cfg.mem_mb),
+        "--notrack",
+    ]
+    if cfg.skip_bids_validation:
+        base_cli += ["--skip-bids-validation"]
+    if cfg.output_spaces:
+        base_cli += ["--output-spaces"] + cfg.output_spaces.split()
+    if cfg.use_aroma:
+        base_cli += ["--use-aroma"]
+    if cfg.cifti_output:
+        base_cli += ["--cifti-output", "91k"]
+    if not cfg.fs_reconall:
+        base_cli += ["--fs-no-reconall"]
+    if cfg.use_syn_sdc:
+        base_cli += ["--use-syn-sdc"]
+    if cfg.extra:
+        base_cli += cfg.extra.split()
+
+    bids_dir_in = "/data"
+    out_dir_in = "/out"
+    work_dir_in = "/work"
+    fs_license_in = "/opt/freesurfer/license.txt"
+
+    if cfg.container_runtime == "singularity":
+        # singularity or apptainer
+        singularity_bin = "singularity" if which("singularity") else "apptainer"
+        cmd = [
+            singularity_bin, "run", "--cleanenv",
+            "-B", f"{cfg.bids}:{bids_dir_in}:ro",
+            "-B", f"{cfg.out}:{out_dir_in}",
+            "-B", f"{cfg.work}:{work_dir_in}",
+            "-B", f"{cfg.fs_license}:{fs_license_in}:ro",
+            cfg.container,
+            bids_dir_in, out_dir_in
+        ] + base_cli + ["--work-dir", work_dir_in, "--fs-license-file", fs_license_in]
+        return cmd
+
+    if cfg.container_runtime == "fmriprep-docker":
+        # wrapper mounts paths for us
+        cmd = [
+            "fmriprep-docker",
+            str(cfg.bids), str(cfg.out),
+        ] + base_cli + ["--work-dir", str(cfg.work), "--fs-license-file", str(cfg.fs_license)]
+        return cmd
+
+    if cfg.container_runtime == "docker":
+        img = cfg.container
+        cmd = [
+            "docker", "run", "--rm",
+            "-v", f"{cfg.bids}:{bids_dir_in}:ro",
+            "-v", f"{cfg.out}:{out_dir_in}",
+            "-v", f"{cfg.work}:{work_dir_in}",
+            "-v", f"{cfg.fs_license}:{fs_license_in}:ro",
+            img,
+            bids_dir_in, out_dir_in
+        ] + base_cli + ["--work-dir", work_dir_in, "--fs-license-file", fs_license_in]
+        return cmd
+
+    raise ValueError(f"Unknown runtime: {cfg.container_runtime}")
+
+
+# ---------------------------- Slurm script generation ----------------------------
+
+SLURM_TEMPLATE = """\
+#!/usr/bin/env bash
+#
+# Auto-generated by fmriprep_launcher.py
+#
+#SBATCH --job-name={job_name}
+#SBATCH --partition={partition}
+#SBATCH --time={time}
+#SBATCH --cpus-per-task={cpus_per_task}
+#SBATCH --mem={mem}
+#SBATCH --nodes=1
+#SBATCH --array=0-{array_max}
+#SBATCH --output={log_dir}/%x_%A_%a.out
+#SBATCH --error={log_dir}/%x_%A_%a.err
+{account_line}{mail_line}{module_line}
+
+set -euo pipefail
+
+# ===== User settings (auto-generated) =====
+BIDS_DIR="{bids}"
+OUT_DIR="{out}"
+WORK_DIR="{work}"
+FS_LICENSE="{fs_license}"
+SUBJECT_LIST_FILE="{subject_file}"
+RUNTIME="{runtime}"                  # singularity | fmriprep-docker | docker
+CONTAINER="{container}"              # path to .sif or docker image:tag
+OMP_THREADS="{omp_threads}"
+NPROCS="{nprocs}"
+MEM_MB="{mem_mb}"
+EXTRA_FLAGS="{extra_flags}"
+SKIP_BIDS_VAL="{skip_bids_val}"
+OUTPUT_SPACES="{output_spaces}"
+USE_AROMA="{use_aroma}"
+CIFTI="{cifti}"
+FS_RECONALL="{fs_reconall}"
+USE_SYN_SDC="{use_syn_sdc}"
+
+# ===== Derived settings =====
+SUBJECTS=($(grep -v '^#' "$SUBJECT_LIST_FILE" | sed '/^$/d'))
+SUB=${{SUBJECTS[$SLURM_ARRAY_TASK_ID]}}
+if [[ -z "$SUB" ]]; then
+  echo "No subject for index $SLURM_ARRAY_TASK_ID"; exit 1;
+fi
+
+mkdir -p "$OUT_DIR" "$WORK_DIR" "{log_dir}"
+
+CLI=(participant --participant-label "${{SUB#sub-}}" --nprocs "$NPROCS" --omp-nthreads "$OMP_THREADS" --mem-mb "$MEM_MB" --notrack)
+
+if [[ "$SKIP_BIDS_VAL" == "1" ]]; then
+  CLI+=(--skip-bids-validation)
+fi
+if [[ -n "$OUTPUT_SPACES" ]]; then
+  CLI+=(--output-spaces $OUTPUT_SPACES)
+fi
+if [[ "$USE_AROMA" == "1" ]]; then
+  CLI+=(--use-aroma)
+fi
+if [[ "$CIFTI" == "1" ]]; then
+  CLI+=(--cifti-output 91k)
+fi
+if [[ "$FS_RECONALL" == "0" ]]; then
+  CLI+=(--fs-no-reconall)
+fi
+if [[ "$USE_SYN_SDC" == "1" ]]; then
+  CLI+=(--use-syn-sdc)
+fi
+if [[ -n "$EXTRA_FLAGS" ]]; then
+  CLI+=($EXTRA_FLAGS)
+fi
+
+echo "=== Running fMRIPrep for $SUB on $HOSTNAME ==="
+echo "Runtime: $RUNTIME"
+echo "Container: $CONTAINER"
+echo "Command: $RUNTIME ... $SUB"
+echo "----------------------------------------------"
+
+if [[ "$RUNTIME" == "singularity" ]]; then
+  RT_BIN=$(command -v singularity || command -v apptainer)
+  "$RT_BIN" run --cleanenv \
+    -B "$BIDS_DIR:/data:ro" \
+    -B "$OUT_DIR:/out" \
+    -B "$WORK_DIR:/work" \
+    -B "$FS_LICENSE:/opt/freesurfer/license.txt:ro" \
+    "$CONTAINER" \
+    /data /out "${{CLI[@]}}" --work-dir /work --fs-license-file /opt/freesurfer/license.txt
+
+elif [[ "$RUNTIME" == "fmriprep-docker" ]]; then
+  fmriprep-docker "$BIDS_DIR" "$OUT_DIR" "${{CLI[@]}}" --work-dir "$WORK_DIR" --fs-license-file "$FS_LICENSE"
+
+elif [[ "$RUNTIME" == "docker" ]]; then
+  docker run --rm \
+    -v "$BIDS_DIR:/data:ro" \
+    -v "$OUT_DIR:/out" \
+    -v "$WORK_DIR:/work" \
+    -v "$FS_LICENSE:/opt/freesurfer/license.txt:ro" \
+    "$CONTAINER" \
+    /data /out "${{CLI[@]}}" --fs-license-file /opt/freesurfer/license.txt --work-dir /work
+
+else
+  echo "Unknown runtime: $RUNTIME" >&2; exit 2
+fi
+"""
+
+def create_slurm_script(
+    cfg: BuildConfig,
+    subject_file: Path,
+    partition: str,
+    time: str,
+    cpus_per_task: int,
+    mem: str,
+    account: Optional[str],
+    email: Optional[str],
+    mail_type: Optional[str],
+    log_dir: Path,
+    module_singularity: bool = True,
+    job_name: str = "fmriprep",
+) -> str:
+    try:
+        n = len([l for l in subject_file.read_text().splitlines() if l.strip() and not l.strip().startswith("#")])
+        array_max = max(0, n - 1)
+    except Exception:
+        array_max = 0
+
+    account_line = f"#SBATCH --account={account}\n" if account else ""
+    mail_line = ""
+    if email:
+        mail_line = f"#SBATCH --mail-user={email}\n"
+        if mail_type:
+            mail_line += f"#SBATCH --mail-type={mail_type}\n"
+    module_line = "module load singularity\n" if module_singularity and cfg.container_runtime == "singularity" else ""
+
+    text = SLURM_TEMPLATE.format(
+        job_name=job_name,
+        partition=partition,
+        time=time,
+        cpus_per_task=cpus_per_task,
+        mem=mem,
+        array_max=array_max,
+        log_dir=str(log_dir),
+        account_line=account_line,
+        mail_line=mail_line,
+        module_line=module_line,
+        bids=str(cfg.bids),
+        out=str(cfg.out),
+        work=str(cfg.work),
+        fs_license=str(cfg.fs_license),
+        subject_file=str(subject_file),
+        runtime=cfg.container_runtime,
+        container=cfg.container,
+        omp_threads=cfg.omp_threads,
+        nprocs=cfg.nprocs,
+        mem_mb=cfg.mem_mb,
+        extra_flags=cfg.extra,
+        skip_bids_val="1" if cfg.skip_bids_validation else "0",
+        output_spaces=cfg.output_spaces or "",
+        use_aroma="1" if cfg.use_aroma else "0",
+        cifti="1" if cfg.cifti_output else "0",
+        fs_reconall="1" if cfg.fs_reconall else "0",
+        use_syn_sdc="1" if cfg.use_syn_sdc else "0",
+    )
+    return text
+
+
+# ---------------------------- Subject helpers ----------------------------
+
+def resolve_subjects_arg(bids: Path, subjects_arg: List[str]) -> List[str]:
+    if len(subjects_arg) == 1 and subjects_arg[0] == "all":
+        return discover_subjects(bids)
+    subs = []
+    for s in subjects_arg:
+        s = s.strip()
+        if not s:
+            continue
+        if not s.startswith("sub-"):
+            s = f"sub-{s}"
+        subs.append(s)
+    return sorted(list(dict.fromkeys(subs)))
+
+
+# ---------------------------- Argparse CLI ----------------------------
+
+def add_common_args(p: argparse.ArgumentParser):
+    p.add_argument("--bids", type=Path, required=True, help="Path to BIDS dataset root")
+    p.add_argument("--out", type=Path, required=True, help="Output directory (usually BIDS/derivatives/fmriprep)")
+    p.add_argument("--work", type=Path, required=True, help="Work directory (scratch)")
+    p.add_argument("--subjects", nargs="+", required=True, help="'all' or a list like sub-01 sub-02 (sub- prefix optional)")
+    p.add_argument("--runtime", choices=["auto","singularity","fmriprep-docker","docker"], default="auto", help="Container runtime")
+    p.add_argument("--container", default="auto", help="Path to .sif (Singularity) or image:tag (Docker). If 'auto', try to pick.")
+    p.add_argument("--fs-license", type=Path, default=None, help="Path to FreeSurfer license.txt (or set FS_LICENSE env var)")
+    p.add_argument("--nprocs", type=int, default=None, help="--nprocs for fMRIPrep (default: from system/Slurm)")
+    p.add_argument("--omp-threads", type=int, default=None, help="--omp-nthreads (default: min(8, nprocs))")
+    p.add_argument("--mem-mb", type=int, default=None, help="--mem-mb (default: ~90%% of available)")
+    p.add_argument("--skip-bids-validation", action="store_true", help="Pass --skip-bids-validation")
+    p.add_argument("--output-spaces", type=str, default=None, help='E.g. "MNI152NLin2009cAsym:res-2 T1w fsnative"')
+    p.add_argument("--use-aroma", action="store_true")
+    p.add_argument("--cifti-output", action="store_true")
+    p.add_argument("--fs-reconall", action="store_true", help="Run FreeSurfer recon-all (default: off)")
+    p.add_argument("--use-syn-sdc", action="store_true", help="Enable SyN-based fieldmap-less distortion correction")
+    p.add_argument("--extra", type=str, default="", help="Extra flags to append to fMRIPrep (quoted string)")
+
+def choose_container(runtime: str, container_arg: str) -> str:
+    if container_arg != "auto":
+        return container_arg
+    if runtime == "singularity":
+        sif_dir = os.environ.get("FMRIPREP_SIF_DIR")
+        images = discover_sif_images(sif_dir)
+        if images:
+            latest = sorted(images, key=lambda p: p.stat().st_mtime, reverse=True)[0]
+            return str(latest)
+        raise RuntimeError("No fMRIPrep .sif/.simg found. Set FMRIPREP_SIF_DIR or pass --container /path/file.sif")
+    elif runtime in ("docker", "fmriprep-docker"):
+        imgs = docker_list_fmriprep_images()
+        if imgs:
+            return imgs[0]
+        return "nipreps/fmriprep:latest"
+    else:
+        raise RuntimeError(f"Unsupported runtime: {runtime}")
+
+def fill_defaults(args):
+    bids: Path = args.bids.expanduser().resolve()
+    out: Path = args.out.expanduser().resolve()
+    work: Path = args.work.expanduser().resolve()
+
+    subjects = resolve_subjects_arg(bids, args.subjects)
+    if not subjects:
+        raise SystemExit("No subjects detected/selected.")
+
+    runtime = detect_runtime(args.runtime)
+    container = choose_container(runtime, args.container)
+
+    fs_license = Path(os.environ.get("FS_LICENSE", "")) if args.fs_license is None else args.fs_license
+    if not fs_license or not fs_license.exists():
+        raise SystemExit("FreeSurfer license not found. Set FS_LICENSE or pass --fs-license /path/to/license.txt")
+
+    cpus_auto, mem_auto = default_resources_from_env()
+    nprocs = args.nprocs or max(1, cpus_auto)
+    omp_threads = args.omp_threads or max(1, min(8, nprocs))
+    mem_mb = args.mem_mb or mem_auto
+
+    return subjects, runtime, Path(container), fs_license.resolve(), omp_threads, nprocs, mem_mb
+
+# ---------------------------- Commands ----------------------------
+
+def cmd_probe(_args):
+    print("=== Probe ===")
+    try:
+        rt = detect_runtime("auto")
+        print(f"Runtime: {rt}")
+    except Exception as e:
+        print(f"Runtime: not found ({e})")
+
+    sif_dir = os.environ.get("FMRIPREP_SIF_DIR")
+    if sif_dir:
+        imgs = discover_sif_images(sif_dir)
+        if imgs:
+            print(f"SIF images in {sif_dir}:")
+            for p in imgs:
+                print(f"  - {p.name}")
+        else:
+            print(f"No fMRIPrep images found in {sif_dir}")
+    else:
+        print("FMRIPREP_SIF_DIR not set")
+
+    docker_imgs = docker_list_fmriprep_images()
+    if docker_imgs:
+        print("Docker images:")
+        for i in docker_imgs:
+            print(f"  - {i}")
+    else:
+        print("No local Docker fMRIPrep images found (or Docker not installed).")
+
+def cmd_print(args):
+    subjects, runtime, container, fs_license, omp_threads, nprocs, mem_mb = fill_defaults(args)
+    cfg = BuildConfig(
+        bids=args.bids, out=args.out, work=args.work, subjects=subjects,
+        container_runtime=runtime, container=str(container),
+        fs_license=fs_license, omp_threads=omp_threads, nprocs=nprocs, mem_mb=mem_mb,
+        extra=args.extra, skip_bids_validation=args.skip_bids_validation,
+        output_spaces=args.output_spaces, use_aroma=args.use_aroma, cifti_output=args.cifti_output,
+        fs_reconall=args.fs_reconall, use_syn_sdc=args.use_syn_sdc
+    )
+    for sub in subjects:
+        cmd = build_fmriprep_command(cfg, sub)
+        print("$ " + " ".join([str(c) for c in cmd]))
+
+def cmd_slurm_array(args):
+    subjects, runtime, container, fs_license, omp_threads, nprocs, mem_mb = fill_defaults(args)
+    cfg = BuildConfig(
+        bids=args.bids, out=args.out, work=args.work, subjects=subjects,
+        container_runtime=runtime, container=str(container),
+        fs_license=fs_license, omp_threads=omp_threads, nprocs=nprocs, mem_mb=mem_mb,
+        extra=args.extra, skip_bids_validation=args.skip_bids_validation,
+        output_spaces=args.output_spaces, use_aroma=args.use_aroma, cifti_output=args.cifti_output,
+        fs_reconall=args.fs_reconall, use_syn_sdc=args.use_syn_sdc
+    )
+    out_dir = args.script_outdir.expanduser().resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    subj_file = out_dir / "subjects.txt"
+    subj_file.write_text("\n".join(subjects) + "\n")
+
+    log_dir = out_dir / "logs"
+    log_dir.mkdir(exist_ok=True)
+
+    text = create_slurm_script(
+        cfg=cfg,
+        subject_file=subj_file,
+        partition=args.partition,
+        time=args.time,
+        cpus_per_task=args.cpus_per_task or nprocs,
+        mem=args.mem or mb_to_human(mem_mb),
+        account=args.account,
+        email=args.email,
+        mail_type=args.mail_type,
+        log_dir=log_dir,
+        module_singularity=args.module_singularity,
+        job_name=args.job_name
+    )
+    script_path = out_dir / "fmriprep_array.sbatch"
+    script_path.write_text(text)
+    os.chmod(script_path, 0o755)
+
+    print(f"\nWrote Slurm script: {script_path}")
+    print(f"Wrote subject list: {subj_file}")
+    print("\nSubmit with:")
+    print(f"  sbatch {script_path}")
+
+def cmd_wizard(_args):
+    # Optional interactive flow; Questionary if available, else text input.
+    try:
+        import questionary
+    except Exception:
+        questionary = None
+
+    def ask(prompt, default=None, validate=None, choices=None, path=False):
+        if questionary:
+            if choices:
+                return questionary.select(prompt, choices=choices).ask()
+            if path:
+                return questionary.path(prompt, default=default).ask()
+            if validate:
+                return questionary.text(prompt, default=default, validate=validate).ask()
+            return questionary.text(prompt, default=default).ask()
+        else:
+            val = input(f"{prompt} [{default if default else ''}]: ").strip()
+            return val or default
+
+    # BIDS
+    bids = Path(ask("BIDS dataset path", default=str(Path.cwd()), path=True)).expanduser()
+    while not bids.exists():
+        print("Path does not exist.")
+        bids = Path(ask("BIDS dataset path", default=str(Path.cwd()), path=True)).expanduser()
+
+    # OUT/WORK
+    out = Path(ask("Output dir (derivatives/fmriprep)", default=str(bids / "derivatives" / "fmriprep"), path=True)).expanduser()
+    work = Path(ask("Work dir (scratch)", default=str(bids / "work_fmriprep"), path=True)).expanduser()
+    out.mkdir(parents=True, exist_ok=True)
+    work.mkdir(parents=True, exist_ok=True)
+
+    # Subjects
+    subs = discover_subjects(bids)
+    if not subs:
+        print("No subjects found in BIDS. Exiting.")
+        return
+    subs_choices = ["all"] + subs
+    sel = ask("Select subjects (choose 'all' for all)", choices=subs_choices)
+    subjects = ["all"] if sel == "all" else [sel]
+
+    # Runtime detection/choice
+    try:
+        runtime = detect_runtime("auto")
+    except Exception as e:
+        print(f"Runtime detection failed: {e}")
+        runtime = ask("Pick a runtime", choices=["singularity", "fmriprep-docker", "docker"])
+
+    # Container selection
+    container = "auto"
+    if runtime == "singularity":
+        sif_dir = os.environ.get("FMRIPREP_SIF_DIR")
+        images = discover_sif_images(sif_dir)
+        if images:
+            container = ask("Choose fMRIPrep .sif/.simg", choices=[str(p) for p in images])
+        else:
+            container = ask("No .sif found. Enter path to fMRIPrep .sif/.simg", default=str(Path.cwd()), path=True)
+    else:
+        imgs = docker_list_fmriprep_images()
+        if imgs:
+            container = ask("Choose Docker image:tag", choices=imgs)
+        else:
+            container = ask("No local Docker images found. Enter image:tag", default="nipreps/fmriprep:latest")
+
+    # FS license
+    fs_license = Path(os.environ.get("FS_LICENSE", ask("Path to FS license", default=str(Path.home() / "license.txt"), path=True))).expanduser()
+
+    # Resources
+    cpus_auto, mem_auto = default_resources_from_env()
+    nprocs = int(ask("nprocs (threads for parallel tasks)", default=str(cpus_auto)))
+    omp_threads = int(ask("omp-nthreads (per-process thread pool)", default=str(min(8, nprocs))))
+    mem_mb = int(ask("mem-mb", default=str(mem_auto)))
+
+    # fMRIPrep flags
+    output_spaces = ask('Output spaces (e.g. "MNI152NLin2009cAsym:res-2 T1w fsnative"; blank for defaults)', default="")
+    skip_bids_validation = ask("Skip BIDS validation? (y/n)", choices=["y","n"]) == "y"
+    use_aroma = ask("Use ICA-AROMA? (y/n)", choices=["y","n"]) == "y"
+    cifti_output = ask("CIFTI output 91k? (y/n)", choices=["y","n"]) == "y"
+    fs_reconall = ask("Run FreeSurfer recon-all? (y/n)", choices=["y","n"]) == "y"
+    use_syn_sdc = ask("Enable SyN SDC? (y/n)", choices=["y","n"]) == "y"
+    extra = ask('Any extra flags? (e.g. "--stop-on-first-crash")', default="")
+
+    # Prepare cfg & preview command
+    selected_subjects = discover_subjects(bids) if subjects == ["all"] else subjects
+    cfg = BuildConfig(
+        bids=bids, out=out, work=work, subjects=selected_subjects,
+        container_runtime=runtime, container=container,
+        fs_license=fs_license, omp_threads=omp_threads, nprocs=nprocs, mem_mb=mem_mb,
+        extra=extra, skip_bids_validation=skip_bids_validation, output_spaces=output_spaces or None,
+        use_aroma=use_aroma, cifti_output=cifti_output, fs_reconall=fs_reconall, use_syn_sdc=use_syn_sdc
+    )
+
+    # Preview one command
+    preview_sub = selected_subjects[0]
+    cmd = build_fmriprep_command(cfg, preview_sub)
+    print("\nExample command:\n$ " + " ".join(cmd))
+
+    # Generate Slurm?
+    gen = ask("Generate Slurm array script now? (y/n)", choices=["y","n"])
+    if gen == "y":
+        outdir = Path(ask("Output directory for script", default=str(Path.cwd() / "fmriprep_job"), path=True)).expanduser()
+        outdir.mkdir(parents=True, exist_ok=True)
+        # Subject list
+        subj_file = outdir / "subjects.txt"
+        subj_file.write_text("\n".join(selected_subjects) + "\n")
+
+        partition = ask("Slurm partition", default=os.environ.get("SLURM_JOB_PARTITION", "compute"))
+        time = ask("Walltime (HH:MM:SS)", default="24:00:00")
+        cpus_per_task = int(ask("cpus-per-task", default=str(nprocs)))
+        mem = ask("Slurm mem (e.g. 32G)", default=mb_to_human(mem_mb))
+        account = ask("Slurm account (optional)", default="") or None
+        email = ask("Email for notifications (optional)", default="") or None
+        mail_type = ask("Mail type (e.g. END,FAIL) (optional)", default="") or None
+        job_name = ask("Job name", default="fmriprep")
+        module_singularity = ask("Insert 'module load singularity'? (y/n)", choices=["y","n"]) == "y"
+
+        script_text = create_slurm_script(
+            cfg=cfg, subject_file=subj_file, partition=partition, time=time,
+            cpus_per_task=cpus_per_task, mem=mem, account=account, email=email,
+            mail_type=mail_type, log_dir=outdir / "logs", module_singularity=module_singularity,
+            job_name=job_name
+        )
+        script_path = outdir / "fmriprep_array.sbatch"
+        (outdir / "logs").mkdir(exist_ok=True)
+        script_path.write_text(script_text)
+        os.chmod(script_path, 0o755)
+        print(f"\nWrote Slurm script: {script_path}\nSubmit with:\n  sbatch {script_path}")
+
+
+# ---------------------------- Main ----------------------------
+
+def main():
+    ap = argparse.ArgumentParser(prog="fmriprep_launcher", description="One-stop fMRIPrep command & Slurm script generator")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    # probe
+    p_probe = sub.add_parser("probe", help="Show detected runtimes and available containers")
+    p_probe.set_defaults(func=cmd_probe)
+
+    # print-cmd
+    p_print = sub.add_parser("print-cmd", help="Print per-subject fMRIPrep command(s)")
+    add_common_args(p_print)
+    p_print.set_defaults(func=cmd_print)
+
+    # slurm-array
+    p_slurm = sub.add_parser("slurm-array", help="Generate a Slurm array script and subject list")
+    add_common_args(p_slurm)
+    p_slurm.add_argument("--script-outdir", type=Path, default=Path("./fmriprep_job"), help="Where to write sbatch and logs/")
+    p_slurm.add_argument("--partition", default="compute")
+    p_slurm.add_argument("--time", default="24:00:00", help="Walltime, e.g. 24:00:00")
+    p_slurm.add_argument("--cpus-per-task", type=int, default=None)
+    p_slurm.add_argument("--mem", default=None, help="Slurm memory request (e.g. 32G). Default: based on mem-mb")
+    p_slurm.add_argument("--account", default=None)
+    p_slurm.add_argument("--email", default=None)
+    p_slurm.add_argument("--mail-type", default=None)
+    p_slurm.add_argument("--job-name", default="fmriprep")
+    p_slurm.add_argument("--module-singularity", action="store_true", help="Insert 'module load singularity' in script")
+    p_slurm.set_defaults(func=cmd_slurm_array)
+
+    # wizard
+    p_wiz = sub.add_parser("wizard", help="Interactive setup (questionary if available, else basic prompts)")
+    p_wiz.set_defaults(func=cmd_wizard)
+
+    args = ap.parse_args()
+    args.func(args)
+
+if __name__ == "__main__":
+    main()
