@@ -143,14 +143,19 @@ def detect_runtime():
         return "docker"
     return None
 
-def discover_sif_images():
+def discover_sif_images(search_dir=None):
     images = []
-    sif_dir = os.environ.get("FMRIPREP_SIF_DIR")
+    # Use provided directory or fall back to environment variable
+    if search_dir:
+        sif_dir = search_dir
+    else:
+        sif_dir = os.environ.get("FMRIPREP_SIF_DIR")
+    
     if sif_dir and os.path.isdir(os.path.expanduser(sif_dir)):
         for p in Path(os.path.expanduser(sif_dir)).iterdir():
             if p.suffix.lower() in (".sif", ".simg") and "fmriprep" in p.name.lower():
                 images.append(str(p))
-    return images
+    return sorted(images)
 
 def docker_list_fmriprep_images():
     if not which("docker"):
@@ -292,7 +297,26 @@ def main():
         if images:
             container = questionary.select("Choose fMRIPrep .sif/.simg", choices=images).ask()
         else:
-            container = questionary.path("Enter path to fMRIPrep .sif/.simg:", validate=PathExistsValidator()).ask()
+            # Ask for path - could be file or directory
+            path_input = questionary.path(
+                "Enter path to fMRIPrep .sif/.simg or directory containing them:", 
+                validate=PathExistsValidator()
+            ).ask()
+            path_obj = Path(path_input).expanduser()
+            
+            # If it's a directory, scan for .sif/.simg files
+            if path_obj.is_dir():
+                dir_images = discover_sif_images(str(path_obj))
+                if dir_images:
+                    container = questionary.select("Found fMRIPrep images. Choose one:", choices=dir_images).ask()
+                else:
+                    print(f"No .sif/.simg files found in {path_obj}")
+                    container = questionary.path(
+                        "Enter full path to fMRIPrep .sif/.simg file:", 
+                        validate=PathExistsValidator()
+                    ).ask()
+            else:
+                container = path_input
     elif runtime == "docker":
         imgs = docker_list_fmriprep_images()
         if imgs:

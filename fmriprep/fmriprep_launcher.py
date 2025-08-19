@@ -655,7 +655,20 @@ def cmd_wizard(_args):
         if images:
             container = ask("Choose fMRIPrep .sif/.simg", choices=[str(p) for p in images])
         else:
-            container = ask("No .sif found. Enter path to fMRIPrep .sif/.simg", default=str(Path.cwd()), path=True)
+            # Ask for path - could be file or directory
+            path_input = ask("No .sif found. Enter path to fMRIPrep .sif/.simg or directory containing them", default=str(Path.cwd()), path=True)
+            path_obj = Path(path_input).expanduser()
+            
+            # If it's a directory, scan for .sif/.simg files
+            if path_obj.is_dir():
+                dir_images = discover_sif_images(str(path_obj))
+                if dir_images:
+                    container = ask("Found fMRIPrep images. Choose one:", choices=[str(p) for p in dir_images])
+                else:
+                    print(f"No .sif/.simg files found in {path_obj}")
+                    container = ask("Enter full path to fMRIPrep .sif/.simg file", default=str(Path.cwd()), path=True)
+            else:
+                container = path_input
     else:
         imgs = docker_list_fmriprep_images()
         if imgs:
