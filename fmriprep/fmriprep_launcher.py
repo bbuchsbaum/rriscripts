@@ -712,26 +712,59 @@ def cmd_wizard(_args):
         print("=" * 60)
         print("📦 'questionary' package not found!")
         print("This provides a better interface with tab completion.")
-        print("\nTo install it, run one of:")
-        print("  pip install questionary")
-        print("  pip install --user questionary")
-        print("  conda install -c conda-forge questionary")
-        print("\nTrying automatic installation...")
-        print("=" * 60)
+        print("\nTo install it:")
         
-        # Try to install questionary automatically
+        # Check which package managers are available
         import subprocess
         import sys
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", "questionary"])
-            print("✅ Successfully installed questionary!")
-            print("Please restart the wizard to use the improved interface.")
-            sys.exit(0)
-        except subprocess.CalledProcessError:
-            print("\n⚠️  Automatic installation failed.")
-            print("Continuing with basic interface (no tab completion)...")
-            print("=" * 60 + "\n")
-            questionary = None
+        from shutil import which
+        
+        install_methods = []
+        if which("pip") or which("pip3"):
+            install_methods.append("  pip install --user questionary")
+        if which("conda"):
+            install_methods.append("  conda install -c conda-forge questionary")
+        if which("mamba"):
+            install_methods.append("  mamba install -c conda-forge questionary")
+        
+        # Check if we're on Compute Canada / Digital Research Alliance
+        if "/cvmfs/" in sys.executable or "computecanada" in sys.executable.lower():
+            print("\n🍁 Detected Compute Canada/Alliance environment:")
+            print("  1. Load Python module: module load python/3.x")
+            print("  2. Create virtual env: python -m venv ~/myenv")
+            print("  3. Activate it: source ~/myenv/bin/activate")
+            print("  4. Install: pip install questionary")
+            print("\n  OR use conda:")
+            print("  1. module load conda (or miniconda)")
+            print("  2. conda create -n fmriprep python=3.9")
+            print("  3. conda activate fmriprep")
+            print("  4. conda install -c conda-forge questionary")
+        elif install_methods:
+            print("\nAvailable installation methods:")
+            for method in install_methods:
+                print(method)
+        else:
+            print("\n⚠️  No package manager found (pip/conda/mamba)")
+            print("Please install Python packages according to your")
+            print("system's documentation.")
+        
+        # Only try auto-install if pip is actually available
+        if which("pip") or which("pip3"):
+            print("\nTrying automatic installation...")
+            print("=" * 60)
+            try:
+                pip_cmd = "pip3" if which("pip3") else "pip"
+                subprocess.check_call([pip_cmd, "install", "--user", "questionary"], 
+                                    stderr=subprocess.DEVNULL)
+                print("✅ Successfully installed questionary!")
+                print("Please restart the wizard to use the improved interface.")
+                sys.exit(0)
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                print("\n⚠️  Automatic installation failed.")
+        
+        print("\nContinuing with basic interface (no tab completion)...")
+        print("=" * 60 + "\n")
+        questionary = None
 
     def ask(prompt, default=None, validate=None, choices=None, path=False):
         if questionary:
