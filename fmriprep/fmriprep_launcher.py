@@ -486,40 +486,55 @@ def add_common_args(p: argparse.ArgumentParser, config: Dict[str, str] = None):
     if config is None:
         config = {}
     
-    p.add_argument("--bids", type=Path, default=config.get("bids"), required=not config.get("bids"), help="Path to BIDS dataset root")
-    p.add_argument("--out", type=Path, default=config.get("out"), required=not config.get("out"), help="Output directory (usually BIDS/derivatives/fmriprep)")
-    p.add_argument("--work", type=Path, default=config.get("work"), required=not config.get("work"), help="Work directory (scratch)")
+    # Helper to show config defaults in help text
+    def help_with_default(text, key, fallback=""):
+        if key in config:
+            return f"{text} [config: {config[key]}]"
+        elif fallback:
+            return f"{text} [default: {fallback}]"
+        return text
+    
+    p.add_argument("--bids", type=Path, default=config.get("bids"), required=not config.get("bids"), 
+                   help=help_with_default("Path to BIDS dataset root", "bids"))
+    p.add_argument("--out", type=Path, default=config.get("out"), required=not config.get("out"), 
+                   help=help_with_default("Output directory (usually BIDS/derivatives/fmriprep)", "out"))
+    p.add_argument("--work", type=Path, default=config.get("work"), required=not config.get("work"), 
+                   help=help_with_default("Work directory (scratch)", "work"))
     p.add_argument("--subjects", nargs="+", default=config.get("subjects", "").split() if config.get("subjects") else None, 
-                   required=not config.get("subjects"), help="'all' or a list like sub-01 sub-02 (sub- prefix optional)")
+                   required=not config.get("subjects"), 
+                   help=help_with_default("'all' or a list like sub-01 sub-02 (sub- prefix optional)", "subjects"))
     p.add_argument("--runtime", choices=["auto","singularity","fmriprep-docker","docker"], 
-                   default=config.get("runtime", "auto"), help="Container runtime")
+                   default=config.get("runtime", "auto"), 
+                   help=help_with_default("Container runtime", "runtime", "auto"))
     p.add_argument("--container", default=config.get("container", "auto"), 
-                   help="Path to .sif (Singularity) or image:tag (Docker). If 'auto', try to pick.")
+                   help=help_with_default("Path to .sif (Singularity) or image:tag (Docker). If 'auto', try to pick", "container", "auto"))
     p.add_argument("--fs-license", type=Path, default=config.get("fs_license"), 
-                   help="Path to FreeSurfer license.txt (or set FS_LICENSE env var)")
+                   help=help_with_default("Path to FreeSurfer license.txt (or set FS_LICENSE env var)", "fs_license"))
     p.add_argument("--nprocs", type=int, default=int(config["nprocs"]) if "nprocs" in config else None, 
-                   help="--nprocs for fMRIPrep (default: from system/Slurm)")
+                   help=help_with_default("--nprocs for fMRIPrep", "nprocs", "auto-detect from system/Slurm"))
     p.add_argument("--omp-threads", type=int, default=int(config["omp_threads"]) if "omp_threads" in config else None, 
-                   help="--omp-nthreads (default: min(8, nprocs))")
+                   help=help_with_default("--omp-nthreads", "omp_threads", "min(8, nprocs)"))
     p.add_argument("--mem-mb", type=int, default=int(config["mem_mb"]) if "mem_mb" in config else None, 
-                   help="--mem-mb (default: ~90%% of available)")
+                   help=help_with_default("--mem-mb", "mem_mb", "~90% of available"))
     p.add_argument("--skip-bids-validation", action="store_true", 
                    default=config.get("skip_bids_validation", "").lower() == "true", 
-                   help="Pass --skip-bids-validation")
+                   help=help_with_default("Pass --skip-bids-validation", "skip_bids_validation"))
     p.add_argument("--output-spaces", type=str, default=config.get("output_spaces"), 
-                   help='E.g. "MNI152NLin2009cAsym:res-2 T1w fsnative"')
+                   help=help_with_default('Output spaces e.g. "MNI152NLin2009cAsym:res-2 T1w fsnative"', "output_spaces"))
     p.add_argument("--use-aroma", action="store_true", 
-                   default=config.get("use_aroma", "").lower() == "true")
+                   default=config.get("use_aroma", "").lower() == "true",
+                   help=help_with_default("Use ICA-AROMA", "use_aroma"))
     p.add_argument("--cifti-output", action="store_true", 
-                   default=config.get("cifti_output", "").lower() == "true")
+                   default=config.get("cifti_output", "").lower() == "true",
+                   help=help_with_default("Generate CIFTI outputs", "cifti_output"))
     p.add_argument("--fs-reconall", action="store_true", 
                    default=config.get("fs_reconall", "").lower() == "true", 
-                   help="Run FreeSurfer recon-all (default: off)")
+                   help=help_with_default("Run FreeSurfer recon-all", "fs_reconall", "off"))
     p.add_argument("--use-syn-sdc", action="store_true", 
                    default=config.get("use_syn_sdc", "").lower() == "true", 
-                   help="Enable SyN-based fieldmap-less distortion correction")
+                   help=help_with_default("Enable SyN-based fieldmap-less distortion correction", "use_syn_sdc"))
     p.add_argument("--extra", type=str, default=config.get("extra", ""), 
-                   help="Extra flags to append to fMRIPrep (quoted string)")
+                   help=help_with_default("Extra flags to append to fMRIPrep (quoted string)", "extra"))
 
 def choose_container(runtime: str, container_arg: str) -> str:
     if container_arg != "auto":
@@ -843,12 +858,65 @@ def cmd_wizard(_args):
 # ---------------------------- Main ----------------------------
 
 def main():
-    ap = argparse.ArgumentParser(prog="fmriprep_launcher", description="One-stop fMRIPrep command & Slurm script generator")
-    ap.add_argument("--config", type=str, help="Path to additional config file")
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    ap = argparse.ArgumentParser(
+        prog="fmriprep_launcher", 
+        description="One-stop fMRIPrep command & Slurm script generator",
+        epilog="""
+Configuration Files:
+  Defaults can be set in INI-format config files. Files are read in order:
+    1. /etc/fmriprep/config.ini (system-wide)
+    2. ~/.config/fmriprep/config.ini or ~/.fmriprep.ini (user)
+    3. ./fmriprep.ini (project-specific)
+    4. File specified with --config (highest priority)
+  
+  Config file format:
+    [defaults]
+    bids = /path/to/bids
+    work = /scratch/work
+    container = /path/to/fmriprep.sif
+    fs_license = /path/to/license.txt
+    runtime = singularity
+    nprocs = 8
+    omp_threads = 2
+    mem_mb = 32000
+    skip_bids_validation = true
+    output_spaces = MNI152NLin2009cAsym:res-2 T1w
+    use_aroma = false
+    cifti_output = false
+    fs_reconall = false
+    use_syn_sdc = false
+    extra = --stop-on-first-crash
+    subjects = sub-01 sub-02  # or 'all'
+    
+    [slurm]
+    partition = compute
+    time = 24:00:00
+    cpus_per_task = 8
+    mem = 32G
+    account = rrg-mylab
+    email = user@university.edu
+    mail_type = END,FAIL
+    job_name = fmriprep
+    script_outdir = ./fmriprep_job
+    log_dir = /scratch/logs
+
+Environment Variables:
+  FMRIPREP_SIF_DIR - Directory containing .sif/.simg files
+  FS_LICENSE - FreeSurfer license path (fallback if not in config)
+  SLURM_* - Various SLURM variables for resource detection
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument("--config", type=str, help="Path to additional config file (overrides defaults)")
+    
+    # Parse just the config arg first
+    config_args, remaining = ap.parse_known_args()
     
     # Load configuration defaults
-    config = load_config([ap.parse_known_args()[0].config] if ap.parse_known_args()[0].config else [])
+    config = load_config([config_args.config] if config_args.config else [])
+    
+    # Now add subparsers
+    sub = ap.add_subparsers(dest="cmd", required=True)
 
     # probe
     p_probe = sub.add_parser("probe", help="Show detected runtimes and available containers")
