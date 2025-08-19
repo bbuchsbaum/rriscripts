@@ -47,9 +47,19 @@ def run_cmd(cmd: List[str], check=False) -> Tuple[int, str, str]:
 def mb_to_human(mb: int) -> str:
     """Convert integer MB to Slurm-friendly string."""
     if mb >= 1_000_000:
-        return f"{mb/1_000_000:.1f}T"
+        tb = mb / 1_000_000
+        # Check if effectively a whole number (within 0.05)
+        if abs(tb - round(tb)) < 0.05:
+            return f"{round(tb)}T"
+        else:
+            return f"{tb:.1f}T"
     if mb >= 1000:
-        return f"{mb/1000:.1f}G"
+        gb = mb / 1000
+        # Check if effectively a whole number (within 0.05)
+        if abs(gb - round(gb)) < 0.05:
+            return f"{round(gb)}G"
+        else:
+            return f"{gb:.1f}G"
     return f"{mb}M"
 
 def read_meminfo_mb() -> int:
