@@ -21,6 +21,7 @@ Environment
 """
 
 import argparse
+import configparser
 import os
 import re
 import shutil
@@ -28,8 +29,48 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 
+
+# ---------------------------- Configuration ----------------------------
+
+def load_config(config_paths: List[str] = None) -> Dict[str, str]:
+    """
+    Load configuration from files. Checks in order:
+    1. System config: /etc/fmriprep/config.ini
+    2. User config: ~/.config/fmriprep/config.ini or ~/.fmriprep.ini
+    3. Local config: ./fmriprep.ini
+    4. Custom path if provided
+    
+    Later configs override earlier ones.
+    """
+    if config_paths is None:
+        config_paths = []
+    
+    # Default config locations
+    default_paths = [
+        "/etc/fmriprep/config.ini",
+        Path.home() / ".config" / "fmriprep" / "config.ini",
+        Path.home() / ".fmriprep.ini",
+        Path.cwd() / "fmriprep.ini"
+    ]
+    
+    config = configparser.ConfigParser()
+    defaults = {}
+    
+    for path in default_paths + [Path(p) for p in config_paths]:
+        if isinstance(path, str):
+            path = Path(path)
+        if path.exists():
+            config.read(path)
+            if 'defaults' in config:
+                defaults.update(dict(config['defaults']))
+            # Also check for a 'slurm' section for SLURM-specific defaults
+            if 'slurm' in config:
+                for key, value in config['slurm'].items():
+                    defaults[f'slurm_{key}'] = value
+    
+    return defaults
 
 # ---------------------------- Utilities ----------------------------
 
@@ -441,24 +482,44 @@ def resolve_subjects_arg(bids: Path, subjects_arg: List[str]) -> List[str]:
 
 # ---------------------------- Argparse CLI ----------------------------
 
-def add_common_args(p: argparse.ArgumentParser):
-    p.add_argument("--bids", type=Path, required=True, help="Path to BIDS dataset root")
-    p.add_argument("--out", type=Path, required=True, help="Output directory (usually BIDS/derivatives/fmriprep)")
-    p.add_argument("--work", type=Path, required=True, help="Work directory (scratch)")
-    p.add_argument("--subjects", nargs="+", required=True, help="'all' or a list like sub-01 sub-02 (sub- prefix optional)")
-    p.add_argument("--runtime", choices=["auto","singularity","fmriprep-docker","docker"], default="auto", help="Container runtime")
-    p.add_argument("--container", default="auto", help="Path to .sif (Singularity) or image:tag (Docker). If 'auto', try to pick.")
-    p.add_argument("--fs-license", type=Path, default=None, help="Path to FreeSurfer license.txt (or set FS_LICENSE env var)")
-    p.add_argument("--nprocs", type=int, default=None, help="--nprocs for fMRIPrep (default: from system/Slurm)")
-    p.add_argument("--omp-threads", type=int, default=None, help="--omp-nthreads (default: min(8, nprocs))")
-    p.add_argument("--mem-mb", type=int, default=None, help="--mem-mb (default: ~90%% of available)")
-    p.add_argument("--skip-bids-validation", action="store_true", help="Pass --skip-bids-validation")
-    p.add_argument("--output-spaces", type=str, default=None, help='E.g. "MNI152NLin2009cAsym:res-2 T1w fsnative"')
-    p.add_argument("--use-aroma", action="store_true")
-    p.add_argument("--cifti-output", action="store_true")
-    p.add_argument("--fs-reconall", action="store_true", help="Run FreeSurfer recon-all (default: off)")
-    p.add_argument("--use-syn-sdc", action="store_true", help="Enable SyN-based fieldmap-less distortion correction")
-    p.add_argument("--extra", type=str, default="", help="Extra flags to append to fMRIPrep (quoted string)")
+def add_common_args(p: argparse.ArgumentParser, config: Dict[str, str] = None):
+    if config is None:
+        config = {}
+    
+    p.add_argument("--bids", type=Path, default=config.get("bids"), required=not config.get("bids"), help="Path to BIDS dataset root")
+    p.add_argument("--out", type=Path, default=config.get("out"), required=not config.get("out"), help="Output directory (usually BIDS/derivatives/fmriprep)")
+    p.add_argument("--work", type=Path, default=config.get("work"), required=not config.get("work"), help="Work directory (scratch)")
+    p.add_argument("--subjects", nargs="+", default=config.get("subjects", "").split() if config.get("subjects") else None, 
+                   required=not config.get("subjects"), help="'all' or a list like sub-01 sub-02 (sub- prefix optional)")
+    p.add_argument("--runtime", choices=["auto","singularity","fmriprep-docker","docker"], 
+                   default=config.get("runtime", "auto"), help="Container runtime")
+    p.add_argument("--container", default=config.get("container", "auto"), 
+                   help="Path to .sif (Singularity) or image:tag (Docker). If 'auto', try to pick.")
+    p.add_argument("--fs-license", type=Path, default=config.get("fs_license"), 
+                   help="Path to FreeSurfer license.txt (or set FS_LICENSE env var)")
+    p.add_argument("--nprocs", type=int, default=int(config["nprocs"]) if "nprocs" in config else None, 
+                   help="--nprocs for fMRIPrep (default: from system/Slurm)")
+    p.add_argument("--omp-threads", type=int, default=int(config["omp_threads"]) if "omp_threads" in config else None, 
+                   help="--omp-nthreads (default: min(8, nprocs))")
+    p.add_argument("--mem-mb", type=int, default=int(config["mem_mb"]) if "mem_mb" in config else None, 
+                   help="--mem-mb (default: ~90%% of available)")
+    p.add_argument("--skip-bids-validation", action="store_true", 
+                   default=config.get("skip_bids_validation", "").lower() == "true", 
+                   help="Pass --skip-bids-validation")
+    p.add_argument("--output-spaces", type=str, default=config.get("output_spaces"), 
+                   help='E.g. "MNI152NLin2009cAsym:res-2 T1w fsnative"')
+    p.add_argument("--use-aroma", action="store_true", 
+                   default=config.get("use_aroma", "").lower() == "true")
+    p.add_argument("--cifti-output", action="store_true", 
+                   default=config.get("cifti_output", "").lower() == "true")
+    p.add_argument("--fs-reconall", action="store_true", 
+                   default=config.get("fs_reconall", "").lower() == "true", 
+                   help="Run FreeSurfer recon-all (default: off)")
+    p.add_argument("--use-syn-sdc", action="store_true", 
+                   default=config.get("use_syn_sdc", "").lower() == "true", 
+                   help="Enable SyN-based fieldmap-less distortion correction")
+    p.add_argument("--extra", type=str, default=config.get("extra", ""), 
+                   help="Extra flags to append to fMRIPrep (quoted string)")
 
 def choose_container(runtime: str, container_arg: str) -> str:
     if container_arg != "auto":
@@ -783,7 +844,11 @@ def cmd_wizard(_args):
 
 def main():
     ap = argparse.ArgumentParser(prog="fmriprep_launcher", description="One-stop fMRIPrep command & Slurm script generator")
+    ap.add_argument("--config", type=str, help="Path to additional config file")
     sub = ap.add_subparsers(dest="cmd", required=True)
+    
+    # Load configuration defaults
+    config = load_config([ap.parse_known_args()[0].config] if ap.parse_known_args()[0].config else [])
 
     # probe
     p_probe = sub.add_parser("probe", help="Show detected runtimes and available containers")
@@ -791,21 +856,25 @@ def main():
 
     # print-cmd
     p_print = sub.add_parser("print-cmd", help="Print per-subject fMRIPrep command(s)")
-    add_common_args(p_print)
+    add_common_args(p_print, config)
     p_print.set_defaults(func=cmd_print)
 
     # slurm-array
     p_slurm = sub.add_parser("slurm-array", help="Generate a Slurm array script and subject list")
-    add_common_args(p_slurm)
-    p_slurm.add_argument("--script-outdir", type=Path, default=Path("./fmriprep_job"), help="Where to write sbatch and logs/")
-    p_slurm.add_argument("--partition", default="compute")
-    p_slurm.add_argument("--time", default="24:00:00", help="Walltime, e.g. 24:00:00")
-    p_slurm.add_argument("--cpus-per-task", type=int, default=None)
-    p_slurm.add_argument("--mem", default=None, help="Slurm memory request (e.g. 32G). Default: based on mem-mb. Use 'none' to omit --mem")
-    p_slurm.add_argument("--account", default=None)
-    p_slurm.add_argument("--email", default=None)
-    p_slurm.add_argument("--mail-type", default=None)
-    p_slurm.add_argument("--job-name", default="fmriprep")
+    add_common_args(p_slurm, config)
+    p_slurm.add_argument("--script-outdir", type=Path, 
+                        default=Path(config.get("slurm_script_outdir", "./fmriprep_job")), 
+                        help="Where to write sbatch and logs/")
+    p_slurm.add_argument("--partition", default=config.get("slurm_partition", "compute"))
+    p_slurm.add_argument("--time", default=config.get("slurm_time", "24:00:00"), help="Walltime, e.g. 24:00:00")
+    p_slurm.add_argument("--cpus-per-task", type=int, 
+                        default=int(config["slurm_cpus_per_task"]) if "slurm_cpus_per_task" in config else None)
+    p_slurm.add_argument("--mem", default=config.get("slurm_mem"), 
+                        help="Slurm memory request (e.g. 32G). Default: based on mem-mb. Use 'none' to omit --mem")
+    p_slurm.add_argument("--account", default=config.get("slurm_account"))
+    p_slurm.add_argument("--email", default=config.get("slurm_email"))
+    p_slurm.add_argument("--mail-type", default=config.get("slurm_mail_type"))
+    p_slurm.add_argument("--job-name", default=config.get("slurm_job_name", "fmriprep"))
     p_slurm.add_argument("--module-singularity", action="store_true", help="Insert 'module load singularity' in script")
     p_slurm.add_argument("--log-dir", type=Path, default=None, help="Override log directory (default: script-outdir/logs)")
     p_slurm.add_argument("--no-mem", action="store_true", help="Omit --mem specification (for Trillium cluster)")
