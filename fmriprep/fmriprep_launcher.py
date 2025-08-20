@@ -1036,9 +1036,48 @@ def cmd_wizard(args):
     if not subs:
         print("No subjects found in BIDS. Exiting.")
         return
-    subs_choices = ["all"] + subs
-    sel = ask("Select subjects (choose 'all' for all)", choices=subs_choices)
-    subjects = ["all"] if sel == "all" else [sel]
+    
+    # Ask for subject selection method
+    selection_method = ask("How would you like to select subjects?", 
+                          choices=["all", "single", "multiple", "range"])
+    
+    if selection_method == "all":
+        subjects = ["all"]
+    elif selection_method == "single":
+        sel = ask("Select a subject", choices=subs)
+        subjects = [sel]
+    elif selection_method == "multiple":
+        print("\nAvailable subjects:")
+        for i, sub in enumerate(subs, 1):
+            print(f"  {i}. {sub}")
+        selected_nums = input("Enter subject numbers separated by spaces (e.g., '1 3 5'): ").strip()
+        subjects = []
+        for num_str in selected_nums.split():
+            try:
+                idx = int(num_str) - 1
+                if 0 <= idx < len(subs):
+                    subjects.append(subs[idx])
+            except (ValueError, IndexError):
+                print(f"Skipping invalid selection: {num_str}")
+        if not subjects:
+            print("No valid subjects selected, using all")
+            subjects = ["all"]
+    else:  # range
+        print("\nAvailable subjects:")
+        for i, sub in enumerate(subs, 1):
+            print(f"  {i}. {sub}")
+        range_input = input("Enter range (e.g., '1-5' or '3-10'): ").strip()
+        try:
+            start_str, end_str = range_input.split('-')
+            start = int(start_str) - 1
+            end = int(end_str)
+            subjects = subs[start:end]
+            if not subjects:
+                print("Invalid range, using all")
+                subjects = ["all"]
+        except:
+            print("Invalid range format, using all")
+            subjects = ["all"]
 
     # Runtime detection/choice
     # First check config, then auto-detect if not specified
