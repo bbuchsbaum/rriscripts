@@ -404,21 +404,16 @@ done
 
 mkdir -p "$OUT_DIR" "$WORK_DIR" "{log_dir}"
 
-# Calculate resources per subject when batching
+# When batching, each parallel process gets the full per-subject resources
+# The SLURM job should have been allocated total_resources = per_subject × num_subjects
 if [[ $NUM_SUBJECTS -gt 1 ]]; then
-  # Divide resources among parallel processes
-  NPROCS_PER_SUB=$((NPROCS / NUM_SUBJECTS))
-  # Ensure at least 2 threads per subject
-  NPROCS_PER_SUB=$((NPROCS_PER_SUB < 2 ? 2 : NPROCS_PER_SUB))
-  MEM_PER_SUB=$((MEM_MB / NUM_SUBJECTS))
-  echo "Resources per subject: ${{NPROCS_PER_SUB}} CPUs, ${{MEM_PER_SUB}} MB memory"
-else
-  NPROCS_PER_SUB=$NPROCS
-  MEM_PER_SUB=$MEM_MB
+  echo "Running $NUM_SUBJECTS subjects in parallel"
+  echo "Resources per subject: $NPROCS CPUs, $MEM_MB MB memory"
 fi
 
 # Build base CLI (without participant label, will be added per subject)
-CLI_BASE=(participant --nprocs "$NPROCS_PER_SUB" --omp-nthreads "$OMP_THREADS" --mem-mb "$MEM_PER_SUB" --notrack)
+# Note: NPROCS and MEM_MB are already per-subject values from the config
+CLI_BASE=(participant --nprocs "$NPROCS" --omp-nthreads "$OMP_THREADS" --mem-mb "$MEM_MB" --notrack)
 
 if [[ "$SKIP_BIDS_VAL" == "1" ]]; then
   CLI_BASE+=(--skip-bids-validation)
@@ -464,8 +459,15 @@ if [[ "$RUNTIME" == "singularity" ]]; then
     ENV_PREFIX="SINGULARITYENV"
   fi
   
-  # Export the environment variable for Singularity/Apptainer
+  # Export environment variables for Singularity/Apptainer
   export ${{ENV_PREFIX}}_TEMPLATEFLOW_HOME=/opt/templateflow
+  
+  # Set additional environment variables for newer fMRIPrep versions
+  # Create directories for matplotlib and other configs
+  mkdir -p "$WORK_DIR/.matplotlib" "$WORK_DIR/.cache"
+  export ${{ENV_PREFIX}}_MPLCONFIGDIR=/work/.matplotlib
+  export ${{ENV_PREFIX}}_HOME=/work/.home
+  export ${{ENV_PREFIX}}_NUMEXPR_MAX_THREADS=$OMP_THREADS
   
   # Function to run fMRIPrep for a single subject
   run_subject() {{
@@ -475,6 +477,9 @@ if [[ "$RUNTIME" == "singularity" ]]; then
     # Create unique work directory for this subject to avoid conflicts
     local SUBJECT_WORK_DIR="${{WORK_DIR}}/sub-${{SUBJECT_ID}}"
     mkdir -p "$SUBJECT_WORK_DIR"
+    
+    # Create cache directories for matplotlib and home
+    mkdir -p "$SUBJECT_WORK_DIR/.matplotlib" "$SUBJECT_WORK_DIR/.cache" "$SUBJECT_WORK_DIR/.home"
     
     "$RT_BIN" run --cleanenv \\
       -B "$BIDS_DIR:/data:ro" \\
@@ -503,7 +508,7 @@ if [[ "$RUNTIME" == "singularity" ]]; then
   # Run subjects in parallel
   if [[ $NUM_SUBJECTS -gt 1 ]]; then
     echo "Running $NUM_SUBJECTS subjects in parallel..."
-    printf '%s\\n' "${{SUBJECTS[@]}}" | xargs -n 1 -P $NUM_SUBJECTS -I {{}} bash -c 'run_subject "$@"' _ {{}}
+    printf '%s\\n' "${{SUBJECTS[@]}}" | xargs -P $NUM_SUBJECTS -I {{}} bash -c 'run_subject "$@"' _ {{}}
     echo "All parallel jobs completed"
   else
     # Single subject - run directly
@@ -523,7 +528,13 @@ elif [[ "$RUNTIME" == "docker" ]]; then
     local SUBJECT_WORK_DIR="${{WORK_DIR}}/sub-${{SUBJECT_ID}}"
     mkdir -p "$SUBJECT_WORK_DIR"
     
+    # Create cache directories for matplotlib and home
+    mkdir -p "$SUBJECT_WORK_DIR/.matplotlib" "$SUBJECT_WORK_DIR/.cache" "$SUBJECT_WORK_DIR/.home"
+    
     docker run --rm \\
+      -e MPLCONFIGDIR=/work/.matplotlib \\
+      -e HOME=/work/.home \\
+      -e NUMEXPR_MAX_THREADS=$OMP_THREADS \\
       -v "$BIDS_DIR:/data:ro" \\
       -v "$OUT_DIR:/out" \\
       -v "$SUBJECT_WORK_DIR:/work" \\
@@ -549,7 +560,7 @@ elif [[ "$RUNTIME" == "docker" ]]; then
   # Run subjects in parallel
   if [[ $NUM_SUBJECTS -gt 1 ]]; then
     echo "Running $NUM_SUBJECTS subjects in parallel with Docker..."
-    printf '%s\\n' "${{SUBJECTS[@]}}" | xargs -n 1 -P $NUM_SUBJECTS -I {{}} bash -c 'run_subject_docker "$@"' _ {{}}
+    printf '%s\\n' "${{SUBJECTS[@]}}" | xargs -P $NUM_SUBJECTS -I {{}} bash -c 'run_subject_docker "$@"' _ {{}}
     echo "All parallel jobs completed"
   else
     # Single subject - run directly
@@ -833,25 +844,15 @@ def cmd_slurm_array(args):
     subjects_per_job = max(1, args.subjects_per_job)
     
     # Adjust resources if batching multiple subjects
+    # Since we run subjects in parallel with xargs, we need total_resources = per_subject × num_subjects
     if subjects_per_job > 1:
-        # CPU scaling: diminishing returns with more subjects
-        # First subject uses full nprocs, additional subjects add partial resources
-        # Cap at reasonable limits for single node
-        if subjects_per_job <= 2:
-            adjusted_nprocs = nprocs * subjects_per_job
-        elif subjects_per_job <= 4:
-            adjusted_nprocs = nprocs * 2 + (subjects_per_job - 2) * max(4, nprocs // 2)
-        else:
-            # For many subjects, cap scaling to avoid unreasonable CPU counts
-            adjusted_nprocs = min(nprocs * 3 + (subjects_per_job - 4) * 4, 
-                                 min(172, nprocs * 4))  # Cap at 172 or 4x original
-        
-        # Memory: first subject needs full amount, additional need ~70%
-        adjusted_mem = mem_mb + (subjects_per_job - 1) * int(mem_mb * 0.7)
+        # Simple multiplication: each subject needs full resources
+        adjusted_nprocs = nprocs * subjects_per_job
+        adjusted_mem = mem_mb * subjects_per_job
         
         print(f"Batching {subjects_per_job} subjects per job")
-        print(f"Adjusted resources: {adjusted_nprocs} CPUs, {adjusted_mem} MB memory")
-        print(f"  (Base was {nprocs} CPUs, {mem_mb} MB for single subject)")
+        print(f"Total job resources: {adjusted_nprocs} CPUs, {adjusted_mem} MB memory")
+        print(f"  ({nprocs} CPUs, {mem_mb} MB per subject)")
     else:
         adjusted_mem = mem_mb
         adjusted_nprocs = nprocs
@@ -1233,24 +1234,13 @@ def cmd_wizard(args):
         if subjects_per_job > 1:
             print(f"Will batch {subjects_per_job} subjects per job")
             print(f"Total jobs: {len(batches)}")
-            # Adjust resources for batching
-            # CPU scaling: diminishing returns with more subjects
-            # First subject uses full nprocs, additional subjects add partial resources
-            # Cap at reasonable limits for single node
-            if subjects_per_job <= 2:
-                adjusted_nprocs = nprocs * subjects_per_job
-            elif subjects_per_job <= 4:
-                adjusted_nprocs = nprocs * 2 + (subjects_per_job - 2) * max(4, nprocs // 2)
-            else:
-                # For many subjects, cap scaling to avoid unreasonable CPU counts
-                adjusted_nprocs = min(nprocs * 3 + (subjects_per_job - 4) * 4, 
-                                     min(172, nprocs * 4))  # Cap at 172 or 4x original
+            # Adjust resources for batching - simple multiplication
+            # Since we run subjects in parallel with xargs, each needs full resources
+            adjusted_nprocs = nprocs * subjects_per_job
+            adjusted_mem = mem_mb * subjects_per_job
             
-            # Memory scaling: first subject needs full amount, additional need ~70%
-            adjusted_mem = mem_mb + (subjects_per_job - 1) * int(mem_mb * 0.7)
-            
-            print(f"Adjusted resources: {adjusted_nprocs} CPUs, {adjusted_mem} MB memory")
-            print(f"  (Base was {nprocs} CPUs, {mem_mb} MB for single subject)")
+            print(f"Total job resources: {adjusted_nprocs} CPUs, {adjusted_mem} MB memory")
+            print(f"  ({nprocs} CPUs, {mem_mb} MB per subject)")
             cpus_per_task = int(ask("cpus-per-task", default=str(adjusted_nprocs)))
             mem_mb = adjusted_mem  # Update for later use
             nprocs = adjusted_nprocs
