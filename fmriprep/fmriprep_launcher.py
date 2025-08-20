@@ -216,6 +216,7 @@ class BuildConfig:
     container_runtime: str
     container: str  # .sif path for singularity, image:tag for docker
     fs_license: Path
+    templateflow_home: Optional[Path]  # TemplateFlow directory
     omp_threads: int
     nprocs: int
     mem_mb: int
@@ -267,12 +268,28 @@ def build_fmriprep_command(cfg: BuildConfig, subjects: List[str]) -> List[str]:
     if cfg.container_runtime == "singularity":
         # singularity or apptainer
         singularity_bin = "singularity" if which("singularity") else "apptainer"
+        
+        # Handle TemplateFlow directory
+        if cfg.templateflow_home:
+            templateflow_host = str(cfg.templateflow_home)
+        else:
+            templateflow_host = os.environ.get("TEMPLATEFLOW_HOME", 
+                                              str(Path.home() / ".cache" / "templateflow"))
+        templateflow_container = "/opt/templateflow"
+        
         cmd = [
             singularity_bin, "run", "--cleanenv",
             "-B", f"{cfg.bids}:{bids_dir_in}:ro",
             "-B", f"{cfg.out}:{out_dir_in}",
             "-B", f"{cfg.work}:{work_dir_in}",
             "-B", f"{cfg.fs_license}:{fs_license_in}:ro",
+            "-B", f"{templateflow_host}:{templateflow_container}",
+        ]
+        
+        # Set TemplateFlow environment variable
+        cmd = ["SINGULARITYENV_TEMPLATEFLOW_HOME=" + templateflow_container] + cmd
+        
+        cmd += [
             cfg.container,
             bids_dir_in, out_dir_in
         ] + base_cli + ["--work-dir", work_dir_in, "--fs-license-file", fs_license_in]
@@ -379,13 +396,21 @@ echo "Container: $CONTAINER"
 echo "Command: $RUNTIME ... $SUB"
 echo "----------------------------------------------"
 
+# Setup TemplateFlow directory (use TEMPLATEFLOW_HOME if set, otherwise default)
+# Can be overridden by setting TEMPLATEFLOW_HOME environment variable
+TEMPLATEFLOW_HOST="${{TEMPLATEFLOW_HOME:-{templateflow_home}}}"
+mkdir -p "$TEMPLATEFLOW_HOST"
+echo "TemplateFlow directory: $TEMPLATEFLOW_HOST"
+
 if [[ "$RUNTIME" == "singularity" ]]; then
   RT_BIN=$(command -v singularity || command -v apptainer)
+  SINGULARITYENV_TEMPLATEFLOW_HOME=/opt/templateflow \
   "$RT_BIN" run --cleanenv \
     -B "$BIDS_DIR:/data:ro" \
     -B "$OUT_DIR:/out" \
     -B "$WORK_DIR:/work" \
     -B "$FS_LICENSE:/opt/freesurfer/license.txt:ro" \
+    -B "$TEMPLATEFLOW_HOST:/opt/templateflow" \
     "$CONTAINER" \
     /data /out "${{CLI[@]}}" --work-dir /work --fs-license-file /opt/freesurfer/license.txt
 
@@ -440,6 +465,12 @@ def create_slurm_script(
     if mem and mem.lower() != "none":
         mem_line = f"#SBATCH --mem={mem}\n"
 
+    # Use provided templateflow_home or default
+    if cfg.templateflow_home:
+        templateflow_path = str(cfg.templateflow_home)
+    else:
+        templateflow_path = "$HOME/.cache/templateflow"
+    
     text = SLURM_TEMPLATE.format(
         job_name=job_name,
         partition=partition,
@@ -468,6 +499,7 @@ def create_slurm_script(
         cifti="1" if cfg.cifti_output else "0",
         fs_reconall="1" if cfg.fs_reconall else "0",
         use_syn_sdc="1" if cfg.use_syn_sdc else "0",
+        templateflow_home=templateflow_path,
     )
     return text
 
@@ -518,6 +550,8 @@ def add_common_args(p: argparse.ArgumentParser, config: Dict[str, str] = None):
                    help=help_with_default("Path to .sif (Singularity) or image:tag (Docker). If 'auto', try to pick", "container", "auto"))
     p.add_argument("--fs-license", type=Path, default=config.get("fs_license"), 
                    help=help_with_default("Path to FreeSurfer license.txt (or set FS_LICENSE env var)", "fs_license"))
+    p.add_argument("--templateflow-home", type=Path, default=config.get("templateflow_home"), 
+                   help=help_with_default("Path to TemplateFlow directory (or set TEMPLATEFLOW_HOME env var)", "templateflow_home"))
     p.add_argument("--nprocs", type=int, default=int(config["nprocs"]) if "nprocs" in config else None, 
                    help=help_with_default("--nprocs for fMRIPrep", "nprocs", "auto-detect from system/Slurm"))
     p.add_argument("--omp-threads", type=int, default=int(config["omp_threads"]) if "omp_threads" in config else None, 
@@ -640,7 +674,9 @@ def cmd_print(args):
     cfg = BuildConfig(
         bids=bids, out=out, work=work, subjects=subjects,
         container_runtime=runtime, container=str(container),
-        fs_license=fs_license, omp_threads=omp_threads, nprocs=nprocs, mem_mb=mem_mb,
+        fs_license=fs_license, 
+        templateflow_home=args.templateflow_home.expanduser().resolve() if args.templateflow_home else None,
+        omp_threads=omp_threads, nprocs=nprocs, mem_mb=mem_mb,
         extra=args.extra, skip_bids_validation=args.skip_bids_validation,
         output_spaces=args.output_spaces, use_aroma=args.use_aroma, cifti_output=args.cifti_output,
         fs_reconall=args.fs_reconall, use_syn_sdc=args.use_syn_sdc
@@ -675,7 +711,9 @@ def cmd_slurm_array(args):
     cfg = BuildConfig(
         bids=bids, out=out, work=work, subjects=subjects,
         container_runtime=runtime, container=str(container),
-        fs_license=fs_license, omp_threads=omp_threads, nprocs=adjusted_nprocs, mem_mb=adjusted_mem,
+        fs_license=fs_license,
+        templateflow_home=args.templateflow_home.expanduser().resolve() if args.templateflow_home else None,
+        omp_threads=omp_threads, nprocs=adjusted_nprocs, mem_mb=adjusted_mem,
         extra=args.extra, skip_bids_validation=args.skip_bids_validation,
         output_spaces=args.output_spaces, use_aroma=args.use_aroma, cifti_output=args.cifti_output,
         fs_reconall=args.fs_reconall, use_syn_sdc=args.use_syn_sdc
@@ -886,6 +924,11 @@ def cmd_wizard(_args):
 
     # FS license
     fs_license = Path(os.environ.get("FS_LICENSE", ask("Path to FS license", default=str(Path.home() / "license.txt"), path=True))).expanduser()
+    
+    # TemplateFlow directory
+    default_templateflow = os.environ.get("TEMPLATEFLOW_HOME", str(Path.home() / ".cache" / "templateflow"))
+    templateflow_home = Path(ask("TemplateFlow directory (will be created if needed)", default=default_templateflow, path=True)).expanduser()
+    templateflow_home.mkdir(parents=True, exist_ok=True)
 
     # Resources
     cpus_auto, mem_auto = default_resources_from_env()
@@ -907,7 +950,8 @@ def cmd_wizard(_args):
     cfg = BuildConfig(
         bids=bids, out=out, work=work, subjects=selected_subjects,
         container_runtime=runtime, container=container,
-        fs_license=fs_license, omp_threads=omp_threads, nprocs=nprocs, mem_mb=mem_mb,
+        fs_license=fs_license, templateflow_home=templateflow_home,
+        omp_threads=omp_threads, nprocs=nprocs, mem_mb=mem_mb,
         extra=extra, skip_bids_validation=skip_bids_validation, output_spaces=output_spaces or None,
         use_aroma=use_aroma, cifti_output=cifti_output, fs_reconall=fs_reconall, use_syn_sdc=use_syn_sdc
     )
