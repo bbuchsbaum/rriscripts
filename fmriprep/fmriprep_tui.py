@@ -119,6 +119,12 @@ class FMRIPrepTUI(App):
                     placeholder="/path/to/license.txt",
                     id="fs_license"
                 )
+                yield Label("TemplateFlow Directory:")
+                yield Input(
+                    value=self.config.get('templateflow_home', os.path.expanduser('~/.cache/templateflow')),
+                    placeholder="~/.cache/templateflow",
+                    id="templateflow_home"
+                )
                 yield Button("Scan for Subjects", id="scan_subjects")
             
             # Main area
@@ -219,6 +225,65 @@ class FMRIPrepTUI(App):
                     id="account"
                 )
                 
+                yield Label("Subjects per Job (batching):")
+                yield Input(
+                    value=str(self.config.get('subjects_per_job', 1)),
+                    placeholder="1",
+                    id="subjects_per_job"
+                )
+                
+                yield Label("CPUs per Task:")
+                yield Input(
+                    value=str(self.config.get('slurm_cpus_per_task', '')),
+                    placeholder="auto",
+                    id="cpus_per_task"
+                )
+                
+                yield Label("Memory (e.g., 32G, 760000M):")
+                yield Input(
+                    value=self.config.get('slurm_mem', ''),
+                    placeholder="auto",
+                    id="slurm_mem"
+                )
+                
+                yield Horizontal(
+                    Switch(id="no_mem", value=False),
+                    Label("No memory specification (Trillium)")
+                )
+                
+                yield Label("Email (optional):")
+                yield Input(
+                    value=self.config.get('slurm_email', ''),
+                    placeholder="user@domain.com",
+                    id="email"
+                )
+                
+                yield Label("Mail Type (optional):")
+                yield Input(
+                    value=self.config.get('slurm_mail_type', ''),
+                    placeholder="END,FAIL",
+                    id="mail_type"
+                )
+                
+                yield Label("Job Name:")
+                yield Input(
+                    value=self.config.get('slurm_job_name', 'fmriprep'),
+                    placeholder="fmriprep",
+                    id="job_name"
+                )
+                
+                yield Label("Log Directory (optional):")
+                yield Input(
+                    value=self.config.get('slurm_log_dir', ''),
+                    placeholder="auto (script_outdir/logs)",
+                    id="log_dir"
+                )
+                
+                yield Horizontal(
+                    Switch(id="module_singularity", value=False),
+                    Label("Add 'module load singularity'")
+                )
+                
                 yield Label("Subject List:")
                 yield TextArea(
                     id="subject_list",
@@ -273,6 +338,7 @@ class FMRIPrepTUI(App):
         out_dir = self.query_one("#out_dir", Input).value
         work_dir = self.query_one("#work_dir", Input).value
         fs_license = self.query_one("#fs_license", Input).value
+        templateflow_home = self.query_one("#templateflow_home", Input).value
         
         runtime = self.query_one("#runtime", Select).value
         container = self.query_one("#container", Input).value
@@ -292,6 +358,15 @@ class FMRIPrepTUI(App):
         partition = self.query_one("#partition", Input).value
         time = self.query_one("#time", Input).value
         account = self.query_one("#account", Input).value
+        subjects_per_job = self.query_one("#subjects_per_job", Input).value
+        cpus_per_task = self.query_one("#cpus_per_task", Input).value
+        slurm_mem = self.query_one("#slurm_mem", Input).value
+        no_mem = self.query_one("#no_mem", Switch).value
+        email = self.query_one("#email", Input).value
+        mail_type = self.query_one("#mail_type", Input).value
+        job_name = self.query_one("#job_name", Input).value
+        log_dir = self.query_one("#log_dir", Input).value
+        module_singularity = self.query_one("#module_singularity", Switch).value
         
         subject_list = self.query_one("#subject_list", TextArea).text
         subjects = [s.strip() for s in subject_list.split("\n") if s.strip()]
@@ -315,6 +390,9 @@ class FMRIPrepTUI(App):
             "--mem-mb", mem_mb
         ]
         
+        if templateflow_home:
+            cmd.extend(["--templateflow-home", templateflow_home])
+        
         if skip_bids:
             cmd.append("--skip-bids-validation")
         if output_spaces:
@@ -335,6 +413,24 @@ class FMRIPrepTUI(App):
             ])
             if account:
                 cmd.extend(["--account", account])
+            if subjects_per_job and subjects_per_job != "1":
+                cmd.extend(["--subjects-per-job", subjects_per_job])
+            if cpus_per_task:
+                cmd.extend(["--cpus-per-task", cpus_per_task])
+            if no_mem:
+                cmd.append("--no-mem")
+            elif slurm_mem:
+                cmd.extend(["--mem", slurm_mem])
+            if email:
+                cmd.extend(["--email", email])
+            if mail_type:
+                cmd.extend(["--mail-type", mail_type])
+            if job_name:
+                cmd.extend(["--job-name", job_name])
+            if log_dir:
+                cmd.extend(["--log-dir", log_dir])
+            if module_singularity:
+                cmd.append("--module-singularity")
         
         # Execute
         try:
@@ -361,18 +457,32 @@ bids = {self.query_one("#bids_dir", Input).value}
 out = {self.query_one("#out_dir", Input).value}
 work = {self.query_one("#work_dir", Input).value}
 fs_license = {self.query_one("#fs_license", Input).value}
+templateflow_home = {self.query_one("#templateflow_home", Input).value}
 runtime = {self.query_one("#runtime", Select).value}
 container = {self.query_one("#container", Input).value}
 nprocs = {self.query_one("#nprocs", Input).value}
 omp_threads = {self.query_one("#omp_threads", Input).value}
 mem_mb = {self.query_one("#mem_mb", Input).value}
 skip_bids_validation = {str(self.query_one("#skip_bids", Switch).value).lower()}
+use_aroma = {str(self.query_one("#use_aroma", Switch).value).lower()}
+cifti_output = {str(self.query_one("#cifti_output", Switch).value).lower()}
+fs_reconall = {str(self.query_one("#fs_reconall", Switch).value).lower()}
+use_syn_sdc = {str(self.query_one("#use_syn_sdc", Switch).value).lower()}
 output_spaces = {self.query_one("#output_spaces", Input).value}
 
 [slurm]
 partition = {self.query_one("#partition", Input).value}
 time = {self.query_one("#time", Input).value}
 account = {self.query_one("#account", Input).value}
+subjects_per_job = {self.query_one("#subjects_per_job", Input).value}
+cpus_per_task = {self.query_one("#cpus_per_task", Input).value}
+mem = {self.query_one("#slurm_mem", Input).value}
+no_mem = {str(self.query_one("#no_mem", Switch).value).lower()}
+email = {self.query_one("#email", Input).value}
+mail_type = {self.query_one("#mail_type", Input).value}
+job_name = {self.query_one("#job_name", Input).value}
+log_dir = {self.query_one("#log_dir", Input).value}
+module_singularity = {str(self.query_one("#module_singularity", Switch).value).lower()}
 """
         with open("fmriprep.ini", "w") as f:
             f.write(config_content)
