@@ -772,7 +772,10 @@ def cmd_slurm_array(args):
     print("\nSubmit with:")
     print(f"  sbatch {script_path}")
 
-def cmd_wizard(_args):
+def cmd_wizard(args):
+    # Load config for defaults
+    config = load_config([args.config] if hasattr(args, 'config') and args.config else [])
+    
     # Optional interactive flow; Questionary if available, else text input.
     try:
         import questionary
@@ -866,14 +869,17 @@ def cmd_wizard(_args):
                 return val or default
 
     # BIDS
-    bids = Path(ask("BIDS dataset path", default=str(Path.cwd()), path=True)).expanduser()
+    default_bids = config.get('bids', str(Path.cwd()))
+    bids = Path(ask("BIDS dataset path", default=default_bids, path=True)).expanduser()
     while not bids.exists():
         print("Path does not exist.")
         bids = Path(ask("BIDS dataset path", default=str(Path.cwd()), path=True)).expanduser()
 
     # OUT/WORK
-    out = Path(ask("Output dir (derivatives/fmriprep)", default=str(bids / "derivatives" / "fmriprep"), path=True)).expanduser()
-    work = Path(ask("Work dir (scratch)", default=str(bids / "work_fmriprep"), path=True)).expanduser()
+    default_out = config.get('out', str(bids / "derivatives" / "fmriprep"))
+    default_work = config.get('work', str(bids / "work_fmriprep"))
+    out = Path(ask("Output dir (derivatives/fmriprep)", default=default_out, path=True)).expanduser()
+    work = Path(ask("Work dir (scratch)", default=default_work, path=True)).expanduser()
     out.mkdir(parents=True, exist_ok=True)
     work.mkdir(parents=True, exist_ok=True)
 
@@ -894,8 +900,8 @@ def cmd_wizard(_args):
         runtime = ask("Pick a runtime", choices=["singularity", "fmriprep-docker", "docker"])
 
     # Container selection
-    container = "auto"
-    if runtime == "singularity":
+    container = config.get('container', 'auto')
+    if runtime == "singularity" and container == 'auto':
         sif_dir = os.environ.get("FMRIPREP_SIF_DIR")
         images = discover_sif_images(sif_dir)
         if images:
@@ -923,27 +929,46 @@ def cmd_wizard(_args):
             container = ask("No local Docker images found. Enter image:tag", default="nipreps/fmriprep:latest")
 
     # FS license
-    fs_license = Path(os.environ.get("FS_LICENSE", ask("Path to FS license", default=str(Path.home() / "license.txt"), path=True))).expanduser()
+    default_fs_license = config.get('fs_license', os.environ.get("FS_LICENSE", str(Path.home() / "license.txt")))
+    fs_license = Path(ask("Path to FS license", default=default_fs_license, path=True)).expanduser()
     
     # TemplateFlow directory
-    default_templateflow = os.environ.get("TEMPLATEFLOW_HOME", str(Path.home() / ".cache" / "templateflow"))
+    default_templateflow = config.get('templateflow_home', 
+                                     os.environ.get("TEMPLATEFLOW_HOME", 
+                                                   str(Path.home() / ".cache" / "templateflow")))
     templateflow_home = Path(ask("TemplateFlow directory (will be created if needed)", default=default_templateflow, path=True)).expanduser()
     templateflow_home.mkdir(parents=True, exist_ok=True)
 
     # Resources
     cpus_auto, mem_auto = default_resources_from_env()
-    nprocs = int(ask("nprocs (threads for parallel tasks)", default=str(cpus_auto)))
-    omp_threads = int(ask("omp-nthreads (per-process thread pool)", default=str(min(8, nprocs))))
-    mem_mb = int(ask("mem-mb", default=str(mem_auto)))
+    nprocs = int(ask("nprocs (threads for parallel tasks)", 
+                     default=config.get('nprocs', str(cpus_auto))))
+    omp_threads = int(ask("omp-nthreads (per-process thread pool)", 
+                         default=config.get('omp_threads', str(min(8, nprocs)))))
+    mem_mb = int(ask("mem-mb", 
+                     default=config.get('mem_mb', str(mem_auto))))
 
     # fMRIPrep flags
-    output_spaces = ask('Output spaces (e.g. "MNI152NLin2009cAsym:res-2 T1w fsnative"; blank for defaults)', default="")
-    skip_bids_validation = ask("Skip BIDS validation? (y/n)", choices=["y","n"]) == "y"
-    use_aroma = ask("Use ICA-AROMA? (y/n)", choices=["y","n"]) == "y"
-    cifti_output = ask("CIFTI output 91k? (y/n)", choices=["y","n"]) == "y"
-    fs_reconall = ask("Run FreeSurfer recon-all? (y/n)", choices=["y","n"]) == "y"
-    use_syn_sdc = ask("Enable SyN SDC? (y/n)", choices=["y","n"]) == "y"
-    extra = ask('Any extra flags? (e.g. "--stop-on-first-crash")', default="")
+    output_spaces = ask('Output spaces (e.g. "MNI152NLin2009cAsym:res-2 T1w fsnative"; blank for defaults)', 
+                       default=config.get('output_spaces', ""))
+    
+    default_skip = "y" if config.get('skip_bids_validation', '').lower() == 'true' else "n"
+    skip_bids_validation = ask("Skip BIDS validation? (y/n)", choices=["y","n"], default=default_skip) == "y"
+    
+    default_aroma = "y" if config.get('use_aroma', '').lower() == 'true' else "n"
+    use_aroma = ask("Use ICA-AROMA? (y/n)", choices=["y","n"], default=default_aroma) == "y"
+    
+    default_cifti = "y" if config.get('cifti_output', '').lower() == 'true' else "n"
+    cifti_output = ask("CIFTI output 91k? (y/n)", choices=["y","n"], default=default_cifti) == "y"
+    
+    default_reconall = "y" if config.get('fs_reconall', '').lower() == 'true' else "n"
+    fs_reconall = ask("Run FreeSurfer recon-all? (y/n)", choices=["y","n"], default=default_reconall) == "y"
+    
+    default_syn = "y" if config.get('use_syn_sdc', '').lower() == 'true' else "n"
+    use_syn_sdc = ask("Enable SyN SDC? (y/n)", choices=["y","n"], default=default_syn) == "y"
+    
+    extra = ask('Any extra flags? (e.g. "--stop-on-first-crash")', 
+               default=config.get('extra', ""))
 
     # Prepare cfg & preview command
     selected_subjects = discover_subjects(bids) if subjects == ["all"] else subjects
@@ -967,8 +992,10 @@ def cmd_wizard(_args):
         outdir = Path(ask("Output directory for script", default=str(Path.cwd() / "fmriprep_job"), path=True)).expanduser()
         outdir.mkdir(parents=True, exist_ok=True)
 
-        partition = ask("Slurm partition", default=os.environ.get("SLURM_JOB_PARTITION", "compute"))
-        time = ask("Walltime (HH:MM:SS)", default="24:00:00")
+        partition = ask("Slurm partition", 
+                       default=config.get('slurm_partition', os.environ.get("SLURM_JOB_PARTITION", "compute")))
+        time = ask("Walltime (HH:MM:SS)", 
+                  default=config.get('slurm_time', "24:00:00"))
         
         # Ask about subject batching
         subjects_per_job = int(ask("Subjects per job (1=one job per subject, >1=batch multiple)", default="1"))
@@ -1002,13 +1029,17 @@ def cmd_wizard(_args):
         else:
             mem = None
             
-        account = ask("Slurm account (optional)", default="") or None
-        email = ask("Email for notifications (optional)", default="") or None
-        mail_type = ask("Mail type (e.g. END,FAIL) (optional)", default="") or None
-        job_name = ask("Job name", default="fmriprep")
+        account = ask("Slurm account (optional)", 
+                     default=config.get('slurm_account', "")) or None
+        email = ask("Email for notifications (optional)", 
+                   default=config.get('slurm_email', "")) or None
+        mail_type = ask("Mail type (e.g. END,FAIL) (optional)", 
+                       default=config.get('slurm_mail_type', "")) or None
+        job_name = ask("Job name", 
+                      default=config.get('slurm_job_name', "fmriprep"))
         
         # Ask about log directory
-        default_log = str(outdir / "logs")
+        default_log = config.get('slurm_log_dir', str(outdir / "logs"))
         log_dir_str = ask("Log directory (use scratch path for Trillium)", default=default_log, path=True)
         log_dir = Path(log_dir_str).expanduser()
         
