@@ -33,6 +33,7 @@ ARRAY=""
 ACCOUNT="rrg-brad"
 NOX11=false
 OMP_NUM_THREADS=1
+LOG_DIR="${QEXEC_LOG_DIR:-}"  # Use environment variable if set, otherwise empty
 
 # Help message
 usage() {
@@ -49,6 +50,7 @@ usage() {
     echo "      --account          Account name (default: rrg-brad)."
     echo "      --nox11            Disable X11 forwarding (default: false)."
     echo "  -o, --omp_num_threads  Number of OpenMP threads (default: 1)."
+    echo "  -l, --log-dir          Directory for log output (default: current dir or \$QEXEC_LOG_DIR)."
     echo ""
     echo "Arguments:"
     echo "  <command>              Command to execute in the job (required unless interactive mode is used)."
@@ -59,8 +61,8 @@ usage() {
 # Check if enhanced getopt is available
 if getopt --test > /dev/null; then
     # Use enhanced getopt for robust parsing
-    SHORT_OPTS="t:im:n:j:a:o:h"
-    LONG_OPTS="time:,interactive,mem:,ncpus:,nodes:,name:,array:,account:,nox11,omp_num_threads:,help"
+    SHORT_OPTS="t:im:n:j:a:o:l:h"
+    LONG_OPTS="time:,interactive,mem:,ncpus:,nodes:,name:,array:,account:,nox11,omp_num_threads:,log-dir:,help"
     PARSED_OPTIONS=$(getopt --options $SHORT_OPTS --longoptions $LONG_OPTS --name "$0" -- "$@")
     if [[ $? -ne 0 ]]; then
         usage
@@ -95,6 +97,8 @@ if getopt --test > /dev/null; then
                 NOX11=true; shift ;;
             -o|--omp_num_threads)
                 OMP_NUM_THREADS="$2"; shift 2 ;;
+            -l|--log-dir)
+                LOG_DIR="$2"; shift 2 ;;
             -h|--help)
                 usage ;;
             --)
@@ -135,6 +139,7 @@ else
             --account) ACCOUNT="$2"; shift ;;   # Note: Original shift logic retained for fallback
             --nox11) NOX11=true ;;             # Note: Original shift logic retained for fallback
             -o|--omp_num_threads) OMP_NUM_THREADS="$2"; shift ;; # Note: Original shift logic retained for fallback
+            -l|--log-dir) LOG_DIR="$2"; shift ;;  # Note: Original shift logic retained for fallback
             -h|--help) usage ;;
             --) shift; COMMAND="$*"; break ;;
             -*) echo "Error: Unknown option: $1"; usage ;;
@@ -193,6 +198,14 @@ else
     SBATCH_ARGS+=" --time=${TIME_MINUTES} --account=${ACCOUNT} --cpus-per-task=${NCPUS} --nodes=${NODES}"
     [ -n "$MEM" ] && SBATCH_ARGS+=" --mem=${MEM}"
     [ -n "$JOB_NAME" ] && SBATCH_ARGS+=" --job-name=${JOB_NAME}"
+    
+    # Set output and error file locations if LOG_DIR is specified
+    if [ -n "$LOG_DIR" ]; then
+        # Create the log directory if it doesn't exist
+        mkdir -p "$LOG_DIR" 2>/dev/null || true
+        SBATCH_ARGS+=" --output=${LOG_DIR}/slurm-%j.out"
+        SBATCH_ARGS+=" --error=${LOG_DIR}/slurm-%j.err"
+    fi
 
     SBATCH_CMD="sbatch $SBATCH_ARGS $JOB_SCRIPT"
     echo "Debug: ARRAY=$ARRAY"
