@@ -893,40 +893,70 @@ def cmd_wizard(args):
     subjects = ["all"] if sel == "all" else [sel]
 
     # Runtime detection/choice
-    try:
-        runtime = detect_runtime("auto")
-    except Exception as e:
-        print(f"Runtime detection failed: {e}")
-        runtime = ask("Pick a runtime", choices=["singularity", "fmriprep-docker", "docker"])
+    # First check config, then auto-detect if not specified
+    runtime = config.get('runtime', 'auto')
+    if runtime == 'auto':
+        try:
+            runtime = detect_runtime("auto")
+        except Exception as e:
+            print(f"Runtime detection failed: {e}")
+            runtime = ask("Pick a runtime", choices=["singularity", "fmriprep-docker", "docker"])
 
     # Container selection
     container = config.get('container', 'auto')
-    if runtime == "singularity" and container == 'auto':
-        sif_dir = os.environ.get("FMRIPREP_SIF_DIR")
-        images = discover_sif_images(sif_dir)
-        if images:
-            container = ask("Choose fMRIPrep .sif/.simg", choices=[str(p) for p in images])
-        else:
-            # Ask for path - could be file or directory
-            path_input = ask("No .sif found. Enter path to fMRIPrep .sif/.simg or directory containing them", default=str(Path.cwd()), path=True)
-            path_obj = Path(path_input).expanduser()
-            
-            # If it's a directory, scan for .sif/.simg files
-            if path_obj.is_dir():
-                dir_images = discover_sif_images(str(path_obj))
+    
+    if runtime == "singularity":
+        if container != 'auto':
+            # Container specified in config - check if it's a directory
+            container_path = Path(container).expanduser()
+            if container_path.is_dir():
+                # Scan directory for .sif/.simg files
+                dir_images = discover_sif_images(str(container_path))
                 if dir_images:
-                    container = ask("Found fMRIPrep images. Choose one:", choices=[str(p) for p in dir_images])
+                    # If only one image, use it; otherwise ask
+                    if len(dir_images) == 1:
+                        container = str(dir_images[0])
+                        print(f"Using container from config: {container}")
+                    else:
+                        container = ask("Multiple images found in config directory. Choose one:", choices=[str(p) for p in dir_images])
                 else:
-                    print(f"No .sif/.simg files found in {path_obj}")
+                    print(f"No .sif/.simg files found in config directory: {container_path}")
                     container = ask("Enter full path to fMRIPrep .sif/.simg file", default=str(Path.cwd()), path=True)
             else:
-                container = path_input
-    else:
-        imgs = docker_list_fmriprep_images()
-        if imgs:
-            container = ask("Choose Docker image:tag", choices=imgs)
+                # Use the file path directly
+                print(f"Using container from config: {container}")
         else:
-            container = ask("No local Docker images found. Enter image:tag", default="nipreps/fmriprep:latest")
+            # Auto mode - look for containers
+            sif_dir = os.environ.get("FMRIPREP_SIF_DIR")
+            images = discover_sif_images(sif_dir)
+            if images:
+                container = ask("Choose fMRIPrep .sif/.simg", choices=[str(p) for p in images])
+            else:
+                # Ask for path - could be file or directory
+                path_input = ask("No .sif found. Enter path to fMRIPrep .sif/.simg or directory containing them", default=str(Path.cwd()), path=True)
+                path_obj = Path(path_input).expanduser()
+                
+                # If it's a directory, scan for .sif/.simg files
+                if path_obj.is_dir():
+                    dir_images = discover_sif_images(str(path_obj))
+                    if dir_images:
+                        container = ask("Found fMRIPrep images. Choose one:", choices=[str(p) for p in dir_images])
+                    else:
+                        print(f"No .sif/.simg files found in {path_obj}")
+                        container = ask("Enter full path to fMRIPrep .sif/.simg file", default=str(Path.cwd()), path=True)
+                else:
+                    container = path_input
+    elif runtime in ["docker", "fmriprep-docker"]:
+        if container != 'auto':
+            # Container specified in config
+            print(f"Using Docker image from config: {container}")
+        else:
+            # Auto mode - list Docker images
+            imgs = docker_list_fmriprep_images()
+            if imgs:
+                container = ask("Choose Docker image:tag", choices=imgs)
+            else:
+                container = ask("No local Docker images found. Enter image:tag", default="nipreps/fmriprep:latest")
 
     # FS license
     default_fs_license = config.get('fs_license', os.environ.get("FS_LICENSE", str(Path.home() / "license.txt")))
