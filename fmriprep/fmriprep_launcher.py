@@ -404,23 +404,38 @@ echo "TemplateFlow directory: $TEMPLATEFLOW_HOST"
 
 if [[ "$RUNTIME" == "singularity" ]]; then
   RT_BIN=$(command -v singularity || command -v apptainer)
-  SINGULARITYENV_TEMPLATEFLOW_HOME=/opt/templateflow \
-  "$RT_BIN" run --cleanenv \
-    -B "$BIDS_DIR:/data:ro" \
-    -B "$OUT_DIR:/out" \
-    -B "$WORK_DIR:/work" \
-    -B "$FS_LICENSE:/opt/freesurfer/license.txt:ro" \
-    -B "$TEMPLATEFLOW_HOST:/opt/templateflow" \
-    "$CONTAINER" \
+  # fMRIPrep expects output parent directory and creates 'fmriprep' subdirectory
+  # If OUT_DIR ends with 'fmriprep', use parent; otherwise use as-is
+  if [[ "$(basename "$OUT_DIR")" == "fmriprep" ]]; then
+    OUT_PARENT=$(dirname "$OUT_DIR")
+  else
+    OUT_PARENT="$OUT_DIR"
+  fi
+  
+  SINGULARITYENV_TEMPLATEFLOW_HOME=/opt/templateflow \\
+  "$RT_BIN" run --cleanenv \\
+    -B "$BIDS_DIR:/data:ro" \\
+    -B "$OUT_PARENT:/out" \\
+    -B "$WORK_DIR:/work" \\
+    -B "$FS_LICENSE:/opt/freesurfer/license.txt:ro" \\
+    -B "$TEMPLATEFLOW_HOST:/opt/templateflow" \\
+    "$CONTAINER" \\
     /data /out "${{CLI[@]}}" --work-dir /work --fs-license-file /opt/freesurfer/license.txt
 
 elif [[ "$RUNTIME" == "fmriprep-docker" ]]; then
   fmriprep-docker "$BIDS_DIR" "$OUT_DIR" "${{CLI[@]}}" --work-dir "$WORK_DIR" --fs-license-file "$FS_LICENSE"
 
 elif [[ "$RUNTIME" == "docker" ]]; then
+  # fMRIPrep expects output parent directory and creates 'fmriprep' subdirectory
+  if [[ "$(basename "$OUT_DIR")" == "fmriprep" ]]; then
+    OUT_PARENT=$(dirname "$OUT_DIR")
+  else
+    OUT_PARENT="$OUT_DIR"
+  fi
+  
   docker run --rm \
     -v "$BIDS_DIR:/data:ro" \
-    -v "$OUT_DIR:/out" \
+    -v "$OUT_PARENT:/out" \
     -v "$WORK_DIR:/work" \
     -v "$FS_LICENSE:/opt/freesurfer/license.txt:ro" \
     "$CONTAINER" \
@@ -697,13 +712,24 @@ def cmd_slurm_array(args):
     
     # Adjust resources if batching multiple subjects
     if subjects_per_job > 1:
-        # Scale resources for multiple subjects
+        # CPU scaling: diminishing returns with more subjects
+        # First subject uses full nprocs, additional subjects add partial resources
+        # Cap at reasonable limits for single node
+        if subjects_per_job <= 2:
+            adjusted_nprocs = nprocs * subjects_per_job
+        elif subjects_per_job <= 4:
+            adjusted_nprocs = nprocs * 2 + (subjects_per_job - 2) * max(4, nprocs // 2)
+        else:
+            # For many subjects, cap scaling to avoid unreasonable CPU counts
+            adjusted_nprocs = min(nprocs * 3 + (subjects_per_job - 4) * 4, 
+                                 min(172, nprocs * 4))  # Cap at 172 or 4x original
+        
         # Memory: first subject needs full amount, additional need ~70%
         adjusted_mem = mem_mb + (subjects_per_job - 1) * int(mem_mb * 0.7)
-        # CPUs: scale but not linearly (fMRIPrep can share some resources)
-        adjusted_nprocs = min(nprocs * subjects_per_job, max(nprocs * 2, nprocs + subjects_per_job))
+        
         print(f"Batching {subjects_per_job} subjects per job")
         print(f"Adjusted resources: {adjusted_nprocs} CPUs, {adjusted_mem} MB memory")
+        print(f"  (Base was {nprocs} CPUs, {mem_mb} MB for single subject)")
     else:
         adjusted_mem = mem_mb
         adjusted_nprocs = nprocs
@@ -1043,9 +1069,23 @@ def cmd_wizard(args):
             print(f"Will batch {subjects_per_job} subjects per job")
             print(f"Total jobs: {len(batches)}")
             # Adjust resources for batching
-            adjusted_nprocs = min(nprocs * subjects_per_job, max(nprocs * 2, nprocs + subjects_per_job))
+            # CPU scaling: diminishing returns with more subjects
+            # First subject uses full nprocs, additional subjects add partial resources
+            # Cap at reasonable limits for single node
+            if subjects_per_job <= 2:
+                adjusted_nprocs = nprocs * subjects_per_job
+            elif subjects_per_job <= 4:
+                adjusted_nprocs = nprocs * 2 + (subjects_per_job - 2) * max(4, nprocs // 2)
+            else:
+                # For many subjects, cap scaling to avoid unreasonable CPU counts
+                adjusted_nprocs = min(nprocs * 3 + (subjects_per_job - 4) * 4, 
+                                     min(172, nprocs * 4))  # Cap at 172 or 4x original
+            
+            # Memory scaling: first subject needs full amount, additional need ~70%
             adjusted_mem = mem_mb + (subjects_per_job - 1) * int(mem_mb * 0.7)
+            
             print(f"Adjusted resources: {adjusted_nprocs} CPUs, {adjusted_mem} MB memory")
+            print(f"  (Base was {nprocs} CPUs, {mem_mb} MB for single subject)")
             cpus_per_task = int(ask("cpus-per-task", default=str(adjusted_nprocs)))
             mem_mb = adjusted_mem  # Update for later use
             nprocs = adjusted_nprocs
