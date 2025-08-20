@@ -88,6 +88,35 @@ def run_cmd(cmd: List[str], check=False) -> Tuple[int, str, str]:
     except Exception as e:
         return 1, "", str(e)
 
+def parse_memory_to_mb(value: str) -> int:
+    """Parse memory string (e.g., '32G', '760000', '2T') to MB."""
+    if isinstance(value, int):
+        return value
+    
+    value = str(value).strip().upper()
+    
+    # Try to parse with units
+    import re
+    match = re.match(r'^(\d+(?:\.\d+)?)\s*([KMGT]?)B?$', value)
+    if match:
+        num = float(match.group(1))
+        unit = match.group(2)
+        
+        if unit == 'K':
+            return int(num / 1024)  # KB to MB
+        elif unit == 'M' or unit == '':
+            return int(num)  # Already MB or no unit means MB
+        elif unit == 'G':
+            return int(num * 1024)  # GB to MB  
+        elif unit == 'T':
+            return int(num * 1024 * 1024)  # TB to MB
+    
+    # Fallback: try to parse as plain number
+    try:
+        return int(float(value))
+    except:
+        raise ValueError(f"Cannot parse memory value: {value}")
+
 def mb_to_human(mb: int) -> str:
     """Convert integer MB to Slurm-friendly string."""
     if mb >= 1_000_000:
@@ -404,15 +433,25 @@ echo "TemplateFlow directory: $TEMPLATEFLOW_HOST"
 
 if [[ "$RUNTIME" == "singularity" ]]; then
   RT_BIN=$(command -v singularity || command -v apptainer)
+  
+  # Detect if using Apptainer vs Singularity for environment variable prefix
+  if [[ "$RT_BIN" == *"apptainer"* ]]; then
+    ENV_PREFIX="APPTAINERENV"
+  else
+    ENV_PREFIX="SINGULARITYENV"
+  fi
+  
   # fMRIPrep expects output parent directory and creates 'fmriprep' subdirectory
   # If OUT_DIR ends with 'fmriprep', use parent; otherwise use as-is
   if [[ "$(basename "$OUT_DIR")" == "fmriprep" ]]; then
     OUT_PARENT=$(dirname "$OUT_DIR")
+    OUT_SUBDIR="/out/fmriprep"
   else
     OUT_PARENT="$OUT_DIR"
+    OUT_SUBDIR="/out"
   fi
   
-  SINGULARITYENV_TEMPLATEFLOW_HOME=/opt/templateflow \\
+  ${{ENV_PREFIX}}_TEMPLATEFLOW_HOME=/opt/templateflow \\
   "$RT_BIN" run --cleanenv \\
     -B "$BIDS_DIR:/data:ro" \\
     -B "$OUT_PARENT:/out" \\
@@ -420,7 +459,7 @@ if [[ "$RUNTIME" == "singularity" ]]; then
     -B "$FS_LICENSE:/opt/freesurfer/license.txt:ro" \\
     -B "$TEMPLATEFLOW_HOST:/opt/templateflow" \\
     "$CONTAINER" \\
-    /data /out "${{CLI[@]}}" --work-dir /work --fs-license-file /opt/freesurfer/license.txt
+    /data "$OUT_SUBDIR" "${{CLI[@]}}" --work-dir /work --fs-license-file /opt/freesurfer/license.txt
 
 elif [[ "$RUNTIME" == "fmriprep-docker" ]]; then
   fmriprep-docker "$BIDS_DIR" "$OUT_DIR" "${{CLI[@]}}" --work-dir "$WORK_DIR" --fs-license-file "$FS_LICENSE"
@@ -429,8 +468,10 @@ elif [[ "$RUNTIME" == "docker" ]]; then
   # fMRIPrep expects output parent directory and creates 'fmriprep' subdirectory
   if [[ "$(basename "$OUT_DIR")" == "fmriprep" ]]; then
     OUT_PARENT=$(dirname "$OUT_DIR")
+    OUT_SUBDIR="/out/fmriprep"
   else
     OUT_PARENT="$OUT_DIR"
+    OUT_SUBDIR="/out"
   fi
   
   docker run --rm \
@@ -439,7 +480,7 @@ elif [[ "$RUNTIME" == "docker" ]]; then
     -v "$WORK_DIR:/work" \
     -v "$FS_LICENSE:/opt/freesurfer/license.txt:ro" \
     "$CONTAINER" \
-    /data /out "${{CLI[@]}}" --fs-license-file /opt/freesurfer/license.txt --work-dir /work
+    /data "$OUT_SUBDIR" "${{CLI[@]}}" --fs-license-file /opt/freesurfer/license.txt --work-dir /work
 
 else
   echo "Unknown runtime: $RUNTIME" >&2; exit 2
@@ -571,8 +612,15 @@ def add_common_args(p: argparse.ArgumentParser, config: Dict[str, str] = None):
                    help=help_with_default("--nprocs for fMRIPrep", "nprocs", "auto-detect from system/Slurm"))
     p.add_argument("--omp-threads", type=int, default=int(config["omp_threads"]) if "omp_threads" in config else None, 
                    help=help_with_default("--omp-nthreads", "omp_threads", "min(8, nprocs)"))
-    p.add_argument("--mem-mb", type=int, default=int(config["mem_mb"]) if "mem_mb" in config else None, 
-                   help=help_with_default("--mem-mb", "mem_mb", "~90% of available"))
+    # Parse memory with units support
+    default_mem = None
+    if "mem_mb" in config:
+        try:
+            default_mem = parse_memory_to_mb(config["mem_mb"])
+        except:
+            default_mem = int(config["mem_mb"])
+    p.add_argument("--mem-mb", type=parse_memory_to_mb, default=default_mem,
+                   help=help_with_default("--mem-mb (supports units: 32G, 760000M)", "mem_mb", "~90% of available"))
     p.add_argument("--skip-bids-validation", action="store_true", 
                    default=config.get("skip_bids_validation", "").lower() == "true", 
                    help=help_with_default("Pass --skip-bids-validation", "skip_bids_validation"))
@@ -1001,8 +1049,12 @@ def cmd_wizard(args):
                      default=config.get('nprocs', str(cpus_auto))))
     omp_threads = int(ask("omp-nthreads (per-process thread pool)", 
                          default=config.get('omp_threads', str(min(8, nprocs)))))
-    mem_mb = int(ask("mem-mb", 
-                     default=config.get('mem_mb', str(mem_auto))))
+    mem_str = ask("mem-mb (e.g., 32000 or 32G)", 
+                  default=config.get('mem_mb', str(mem_auto)))
+    try:
+        mem_mb = parse_memory_to_mb(mem_str)
+    except:
+        mem_mb = int(mem_str)
 
     # fMRIPrep flags
     output_spaces = ask('Output spaces (e.g. "MNI152NLin2009cAsym:res-2 T1w fsnative"; blank for defaults)', 
