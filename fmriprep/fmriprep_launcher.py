@@ -451,7 +451,9 @@ if [[ "$RUNTIME" == "singularity" ]]; then
     OUT_SUBDIR="/out"
   fi
   
-  ${{ENV_PREFIX}}_TEMPLATEFLOW_HOME=/opt/templateflow \\
+  # Export the environment variable for Singularity/Apptainer
+  export ${{ENV_PREFIX}}_TEMPLATEFLOW_HOME=/opt/templateflow
+  
   "$RT_BIN" run --cleanenv \\
     -B "$BIDS_DIR:/data:ro" \\
     -B "$OUT_PARENT:/out" \\
