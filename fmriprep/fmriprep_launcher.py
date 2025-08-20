@@ -227,14 +227,18 @@ class BuildConfig:
     fs_reconall: bool
     use_syn_sdc: bool
 
-def build_fmriprep_command(cfg: BuildConfig, subject: str) -> List[str]:
+def build_fmriprep_command(cfg: BuildConfig, subjects: List[str]) -> List[str]:
     """
-    Construct the full fMRIPrep command for one subject.
+    Construct the full fMRIPrep command for one or more subjects.
     """
-    label = subject.replace("sub-", "")
+    # Handle both single subject (string) and multiple subjects (list)
+    if isinstance(subjects, str):
+        subjects = [subjects]
+    
+    labels = [s.replace("sub-", "") for s in subjects]
     base_cli = [
         "participant",
-        "--participant-label", label,
+        "--participant-label"] + labels + [
         "--nprocs", str(cfg.nprocs),
         "--omp-nthreads", str(cfg.omp_threads),
         "--mem-mb", str(cfg.mem_mb),
@@ -415,6 +419,7 @@ def create_slurm_script(
     log_dir: Path,
     module_singularity: bool = True,
     job_name: str = "fmriprep",
+    subjects_per_job: int = 1,  # New parameter for batching
 ) -> str:
     try:
         n = len([l for l in subject_file.read_text().splitlines() if l.strip() and not l.strip().startswith("#")])
@@ -651,10 +656,26 @@ def cmd_slurm_array(args):
     out = args.out.expanduser().resolve()
     work = args.work.expanduser().resolve()
     
+    # Handle subject batching
+    subjects_per_job = max(1, args.subjects_per_job)
+    
+    # Adjust resources if batching multiple subjects
+    if subjects_per_job > 1:
+        # Scale resources for multiple subjects
+        # Memory: first subject needs full amount, additional need ~70%
+        adjusted_mem = mem_mb + (subjects_per_job - 1) * int(mem_mb * 0.7)
+        # CPUs: scale but not linearly (fMRIPrep can share some resources)
+        adjusted_nprocs = min(nprocs * subjects_per_job, max(nprocs * 2, nprocs + subjects_per_job))
+        print(f"Batching {subjects_per_job} subjects per job")
+        print(f"Adjusted resources: {adjusted_nprocs} CPUs, {adjusted_mem} MB memory")
+    else:
+        adjusted_mem = mem_mb
+        adjusted_nprocs = nprocs
+    
     cfg = BuildConfig(
         bids=bids, out=out, work=work, subjects=subjects,
         container_runtime=runtime, container=str(container),
-        fs_license=fs_license, omp_threads=omp_threads, nprocs=nprocs, mem_mb=mem_mb,
+        fs_license=fs_license, omp_threads=omp_threads, nprocs=adjusted_nprocs, mem_mb=adjusted_mem,
         extra=args.extra, skip_bids_validation=args.skip_bids_validation,
         output_spaces=args.output_spaces, use_aroma=args.use_aroma, cifti_output=args.cifti_output,
         fs_reconall=args.fs_reconall, use_syn_sdc=args.use_syn_sdc
@@ -662,8 +683,17 @@ def cmd_slurm_array(args):
     out_dir = args.script_outdir.expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Create subject batches
+    batches = []
+    for i in range(0, len(subjects), subjects_per_job):
+        batch = subjects[i:i + subjects_per_job]
+        batches.append(" ".join(batch))  # Space-separated subjects per line
+    
     subj_file = out_dir / "subjects.txt"
-    subj_file.write_text("\n".join(subjects) + "\n")
+    subj_file.write_text("\n".join(batches) + "\n")
+    
+    if subjects_per_job > 1:
+        print(f"Created {len(batches)} job batches from {len(subjects)} subjects")
 
     # Handle log directory override
     if args.log_dir:
@@ -685,14 +715,15 @@ def cmd_slurm_array(args):
         subject_file=subj_file,
         partition=args.partition,
         time=args.time,
-        cpus_per_task=args.cpus_per_task or nprocs,
+        cpus_per_task=args.cpus_per_task or adjusted_nprocs,
         mem=mem_spec,
         account=args.account,
         email=args.email,
         mail_type=args.mail_type,
         log_dir=log_dir,
         module_singularity=args.module_singularity,
-        job_name=args.job_name
+        job_name=args.job_name,
+        subjects_per_job=subjects_per_job
     )
     script_path = out_dir / "fmriprep_array.sbatch"
     script_path.write_text(text)
@@ -891,13 +922,34 @@ def cmd_wizard(_args):
     if gen == "y":
         outdir = Path(ask("Output directory for script", default=str(Path.cwd() / "fmriprep_job"), path=True)).expanduser()
         outdir.mkdir(parents=True, exist_ok=True)
-        # Subject list
-        subj_file = outdir / "subjects.txt"
-        subj_file.write_text("\n".join(selected_subjects) + "\n")
 
         partition = ask("Slurm partition", default=os.environ.get("SLURM_JOB_PARTITION", "compute"))
         time = ask("Walltime (HH:MM:SS)", default="24:00:00")
-        cpus_per_task = int(ask("cpus-per-task", default=str(nprocs)))
+        
+        # Ask about subject batching
+        subjects_per_job = int(ask("Subjects per job (1=one job per subject, >1=batch multiple)", default="1"))
+        
+        # Create subject batch file
+        batches = []
+        for i in range(0, len(selected_subjects), subjects_per_job):
+            batch = selected_subjects[i:i + subjects_per_job]
+            batches.append(" ".join(batch))  # Space-separated subjects per line
+        
+        subj_file = outdir / "subjects.txt"
+        subj_file.write_text("\n".join(batches) + "\n")
+        
+        if subjects_per_job > 1:
+            print(f"Will batch {subjects_per_job} subjects per job")
+            print(f"Total jobs: {len(batches)}")
+            # Adjust resources for batching
+            adjusted_nprocs = min(nprocs * subjects_per_job, max(nprocs * 2, nprocs + subjects_per_job))
+            adjusted_mem = mem_mb + (subjects_per_job - 1) * int(mem_mb * 0.7)
+            print(f"Adjusted resources: {adjusted_nprocs} CPUs, {adjusted_mem} MB memory")
+            cpus_per_task = int(ask("cpus-per-task", default=str(adjusted_nprocs)))
+            mem_mb = adjusted_mem  # Update for later use
+            nprocs = adjusted_nprocs
+        else:
+            cpus_per_task = int(ask("cpus-per-task", default=str(nprocs)))
         
         # Ask about memory specification
         use_mem = ask("Specify memory limit? (y/n - select 'n' for Trillium)", choices=["y","n"]) == "y"
@@ -922,7 +974,7 @@ def cmd_wizard(_args):
             cfg=cfg, subject_file=subj_file, partition=partition, time=time,
             cpus_per_task=cpus_per_task, mem=mem, account=account, email=email,
             mail_type=mail_type, log_dir=log_dir, module_singularity=module_singularity,
-            job_name=job_name
+            job_name=job_name, subjects_per_job=subjects_per_job
         )
         script_path = outdir / "fmriprep_array.sbatch"
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -1022,6 +1074,9 @@ Environment Variables:
     p_slurm.add_argument("--module-singularity", action="store_true", help="Insert 'module load singularity' in script")
     p_slurm.add_argument("--log-dir", type=Path, default=None, help="Override log directory (default: script-outdir/logs)")
     p_slurm.add_argument("--no-mem", action="store_true", help="Omit --mem specification (for Trillium cluster)")
+    p_slurm.add_argument("--subjects-per-job", type=int, default=1, 
+                        help="Number of subjects to process per job (default: 1). "
+                             "Values >1 batch multiple subjects together, reducing total jobs but requiring more resources per job.")
     p_slurm.set_defaults(func=cmd_slurm_array)
 
     # wizard
