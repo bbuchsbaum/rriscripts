@@ -1,0 +1,21 @@
+{
+    "descriptions": [
+        {
+            "datatype": "anat",
+            "suffix": "T1w",
+            "criteria": {
+                "ProtocolName": "*MPRAGE*"
+            }
+        },
+        {
+            "datatype": "func",
+            "suffix": "bold",
+            "custom_entities": {
+                "task": "encode"
+            },
+            "criteria": {
+                "ProtocolName": "*320*"
+            }
+        }
+    ]
+}

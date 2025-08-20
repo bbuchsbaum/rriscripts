@@ -396,42 +396,50 @@ fi
 
 # Parse subjects from line (space-separated if batching)
 IFS=' ' read -ra SUBJECTS <<< "$SUBJECT_LINE"
-echo "=== Processing ${{#SUBJECTS[@]}} subject(s) in this job ==="
+NUM_SUBJECTS=${{#SUBJECTS[@]}}
+echo "=== Processing $NUM_SUBJECTS subject(s) in this job ==="
 for SUB in "${{SUBJECTS[@]}}"; do
   echo "  - $SUB"
 done
 
-# Build participant labels (remove sub- prefix)
-LABELS=()
-for SUB in "${{SUBJECTS[@]}}"; do
-  LABELS+=("${{SUB#sub-}}")
-done
-
 mkdir -p "$OUT_DIR" "$WORK_DIR" "{log_dir}"
 
-# Build CLI with all participant labels
-CLI=(participant --participant-label "${{LABELS[@]}}" --nprocs "$NPROCS" --omp-nthreads "$OMP_THREADS" --mem-mb "$MEM_MB" --notrack)
+# Calculate resources per subject when batching
+if [[ $NUM_SUBJECTS -gt 1 ]]; then
+  # Divide resources among parallel processes
+  NPROCS_PER_SUB=$((NPROCS / NUM_SUBJECTS))
+  # Ensure at least 2 threads per subject
+  NPROCS_PER_SUB=$((NPROCS_PER_SUB < 2 ? 2 : NPROCS_PER_SUB))
+  MEM_PER_SUB=$((MEM_MB / NUM_SUBJECTS))
+  echo "Resources per subject: ${{NPROCS_PER_SUB}} CPUs, ${{MEM_PER_SUB}} MB memory"
+else
+  NPROCS_PER_SUB=$NPROCS
+  MEM_PER_SUB=$MEM_MB
+fi
+
+# Build base CLI (without participant label, will be added per subject)
+CLI_BASE=(participant --nprocs "$NPROCS_PER_SUB" --omp-nthreads "$OMP_THREADS" --mem-mb "$MEM_PER_SUB" --notrack)
 
 if [[ "$SKIP_BIDS_VAL" == "1" ]]; then
-  CLI+=(--skip-bids-validation)
+  CLI_BASE+=(--skip-bids-validation)
 fi
 if [[ -n "$OUTPUT_SPACES" ]]; then
-  CLI+=(--output-spaces $OUTPUT_SPACES)
+  CLI_BASE+=(--output-spaces $OUTPUT_SPACES)
 fi
 if [[ "$USE_AROMA" == "1" ]]; then
-  CLI+=(--use-aroma)
+  CLI_BASE+=(--use-aroma)
 fi
 if [[ "$CIFTI" == "1" ]]; then
-  CLI+=(--cifti-output 91k)
+  CLI_BASE+=(--cifti-output 91k)
 fi
 if [[ "$FS_RECONALL" == "0" ]]; then
-  CLI+=(--fs-no-reconall)
+  CLI_BASE+=(--fs-no-reconall)
 fi
 if [[ "$USE_SYN_SDC" == "1" ]]; then
-  CLI+=(--use-syn-sdc)
+  CLI_BASE+=(--use-syn-sdc)
 fi
 if [[ -n "$EXTRA_FLAGS" ]]; then
-  CLI+=($EXTRA_FLAGS)
+  CLI_BASE+=($EXTRA_FLAGS)
 fi
 
 echo "=== Running fMRIPrep on $HOSTNAME ==="
@@ -459,26 +467,86 @@ if [[ "$RUNTIME" == "singularity" ]]; then
   # Export the environment variable for Singularity/Apptainer
   export ${{ENV_PREFIX}}_TEMPLATEFLOW_HOME=/opt/templateflow
   
-  "$RT_BIN" run --cleanenv \\
-    -B "$BIDS_DIR:/data:ro" \\
-    -B "$OUT_DIR:/out" \\
-    -B "$WORK_DIR:/work" \\
-    -B "$FS_LICENSE:/opt/freesurfer/license.txt:ro" \\
-    -B "$TEMPLATEFLOW_HOST:/opt/templateflow" \\
-    "$CONTAINER" \\
-    /data /out "${{CLI[@]}}" --work-dir /work --fs-license-file /opt/freesurfer/license.txt
+  # Function to run fMRIPrep for a single subject
+  run_subject() {{
+    local SUBJECT_ID="${{1#sub-}}"
+    echo "Starting fMRIPrep for sub-${{SUBJECT_ID}}..."
+    
+    "$RT_BIN" run --cleanenv \\
+      -B "$BIDS_DIR:/data:ro" \\
+      -B "$OUT_DIR:/out" \\
+      -B "$WORK_DIR:/work" \\
+      -B "$FS_LICENSE:/opt/freesurfer/license.txt:ro" \\
+      -B "$TEMPLATEFLOW_HOST:/opt/templateflow" \\
+      "$CONTAINER" \\
+      /data /out $CLI_BASE_STR --participant-label "${{SUBJECT_ID}}" --work-dir /work --fs-license-file /opt/freesurfer/license.txt
+    
+    local EXIT_CODE=$?
+    if [[ $EXIT_CODE -eq 0 ]]; then
+      echo "✓ Successfully completed sub-${{SUBJECT_ID}}"
+    else
+      echo "✗ Failed sub-${{SUBJECT_ID}} with exit code $EXIT_CODE"
+    fi
+    return $EXIT_CODE
+  }}
+  
+  export -f run_subject
+  export RT_BIN BIDS_DIR OUT_DIR WORK_DIR FS_LICENSE TEMPLATEFLOW_HOST CONTAINER
+  # Export CLI_BASE array elements individually
+  CLI_BASE_STR="${{CLI_BASE[@]}}"
+  export CLI_BASE_STR
+  
+  # Run subjects in parallel
+  if [[ $NUM_SUBJECTS -gt 1 ]]; then
+    echo "Running $NUM_SUBJECTS subjects in parallel..."
+    printf '%s\\n' "${{SUBJECTS[@]}}" | xargs -n 1 -P $NUM_SUBJECTS -I {{}} bash -c 'run_subject "$@"' _ {{}}
+    echo "All parallel jobs completed"
+  else
+    # Single subject - run directly
+    run_subject "${{SUBJECTS[0]}}"
+  fi
 
 elif [[ "$RUNTIME" == "fmriprep-docker" ]]; then
   fmriprep-docker "$BIDS_DIR" "$OUT_DIR" "${{CLI[@]}}" --work-dir "$WORK_DIR" --fs-license-file "$FS_LICENSE"
 
 elif [[ "$RUNTIME" == "docker" ]]; then
-  docker run --rm \
-    -v "$BIDS_DIR:/data:ro" \
-    -v "$OUT_DIR:/out" \
-    -v "$WORK_DIR:/work" \
-    -v "$FS_LICENSE:/opt/freesurfer/license.txt:ro" \
-    "$CONTAINER" \
-    /data /out "${{CLI[@]}}" --fs-license-file /opt/freesurfer/license.txt --work-dir /work
+  # Function to run fMRIPrep for a single subject with Docker
+  run_subject_docker() {{
+    local SUBJECT_ID="${{1#sub-}}"
+    echo "Starting fMRIPrep for sub-${{SUBJECT_ID}} with Docker..."
+    
+    docker run --rm \\
+      -v "$BIDS_DIR:/data:ro" \\
+      -v "$OUT_DIR:/out" \\
+      -v "$WORK_DIR:/work" \\
+      -v "$FS_LICENSE:/opt/freesurfer/license.txt:ro" \\
+      "$CONTAINER" \\
+      /data /out $CLI_BASE_STR --participant-label "${{SUBJECT_ID}}" --fs-license-file /opt/freesurfer/license.txt --work-dir /work
+    
+    local EXIT_CODE=$?
+    if [[ $EXIT_CODE -eq 0 ]]; then
+      echo "✓ Successfully completed sub-${{SUBJECT_ID}}"
+    else
+      echo "✗ Failed sub-${{SUBJECT_ID}} with exit code $EXIT_CODE"
+    fi
+    return $EXIT_CODE
+  }}
+  
+  export -f run_subject_docker
+  export BIDS_DIR OUT_DIR WORK_DIR FS_LICENSE CONTAINER
+  # Export CLI_BASE array elements 
+  CLI_BASE_STR="${{CLI_BASE[@]}}"
+  export CLI_BASE_STR
+  
+  # Run subjects in parallel
+  if [[ $NUM_SUBJECTS -gt 1 ]]; then
+    echo "Running $NUM_SUBJECTS subjects in parallel with Docker..."
+    printf '%s\\n' "${{SUBJECTS[@]}}" | xargs -n 1 -P $NUM_SUBJECTS -I {{}} bash -c 'run_subject_docker "$@"' _ {{}}
+    echo "All parallel jobs completed"
+  else
+    # Single subject - run directly
+    run_subject_docker "${{SUBJECTS[0]}}"
+  fi
 
 else
   echo "Unknown runtime: $RUNTIME" >&2; exit 2
