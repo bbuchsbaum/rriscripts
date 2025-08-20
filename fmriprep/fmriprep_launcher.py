@@ -441,48 +441,29 @@ if [[ "$RUNTIME" == "singularity" ]]; then
     ENV_PREFIX="SINGULARITYENV"
   fi
   
-  # fMRIPrep expects output parent directory and creates 'fmriprep' subdirectory
-  # If OUT_DIR ends with 'fmriprep', use parent; otherwise use as-is
-  if [[ "$(basename "$OUT_DIR")" == "fmriprep" ]]; then
-    OUT_PARENT=$(dirname "$OUT_DIR")
-    OUT_SUBDIR="/out/fmriprep"
-  else
-    OUT_PARENT="$OUT_DIR"
-    OUT_SUBDIR="/out"
-  fi
-  
   # Export the environment variable for Singularity/Apptainer
   export ${{ENV_PREFIX}}_TEMPLATEFLOW_HOME=/opt/templateflow
   
   "$RT_BIN" run --cleanenv \\
     -B "$BIDS_DIR:/data:ro" \\
-    -B "$OUT_PARENT:/out" \\
+    -B "$OUT_DIR:/out" \\
     -B "$WORK_DIR:/work" \\
     -B "$FS_LICENSE:/opt/freesurfer/license.txt:ro" \\
     -B "$TEMPLATEFLOW_HOST:/opt/templateflow" \\
     "$CONTAINER" \\
-    /data "$OUT_SUBDIR" "${{CLI[@]}}" --work-dir /work --fs-license-file /opt/freesurfer/license.txt
+    /data /out "${{CLI[@]}}" --work-dir /work --fs-license-file /opt/freesurfer/license.txt
 
 elif [[ "$RUNTIME" == "fmriprep-docker" ]]; then
   fmriprep-docker "$BIDS_DIR" "$OUT_DIR" "${{CLI[@]}}" --work-dir "$WORK_DIR" --fs-license-file "$FS_LICENSE"
 
 elif [[ "$RUNTIME" == "docker" ]]; then
-  # fMRIPrep expects output parent directory and creates 'fmriprep' subdirectory
-  if [[ "$(basename "$OUT_DIR")" == "fmriprep" ]]; then
-    OUT_PARENT=$(dirname "$OUT_DIR")
-    OUT_SUBDIR="/out/fmriprep"
-  else
-    OUT_PARENT="$OUT_DIR"
-    OUT_SUBDIR="/out"
-  fi
-  
   docker run --rm \
     -v "$BIDS_DIR:/data:ro" \
-    -v "$OUT_PARENT:/out" \
+    -v "$OUT_DIR:/out" \
     -v "$WORK_DIR:/work" \
     -v "$FS_LICENSE:/opt/freesurfer/license.txt:ro" \
     "$CONTAINER" \
-    /data "$OUT_SUBDIR" "${{CLI[@]}}" --fs-license-file /opt/freesurfer/license.txt --work-dir /work
+    /data /out "${{CLI[@]}}" --fs-license-file /opt/freesurfer/license.txt --work-dir /work
 
 else
   echo "Unknown runtime: $RUNTIME" >&2; exit 2
