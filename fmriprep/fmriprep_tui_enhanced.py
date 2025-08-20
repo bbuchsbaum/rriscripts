@@ -142,7 +142,9 @@ class FMRIPrepEnhancedTUI(App):
         # Status bar
         with Container(id="status_bar"):
             yield Static("Ready", id="status")
-            yield ProgressBar(total=100, show_eta=False, id="progress", visible=False)
+            progress = ProgressBar(total=100, show_eta=False, id="progress")
+            progress.display = False
+            yield progress
         
         yield Footer()
     
@@ -551,7 +553,7 @@ class FMRIPrepEnhancedTUI(App):
         """Generate fMRIPrep script"""
         # Show progress
         progress = self.query_one("#progress", ProgressBar)
-        progress.visible = True
+        progress.display = True
         progress.update(progress=0)
         
         # Gather all values
@@ -685,7 +687,7 @@ class FMRIPrepEnhancedTUI(App):
         except Exception as e:
             self.update_status(f"❌ Error: {str(e)[:100]}")
         finally:
-            progress.visible = False
+            progress.display = False
     
     def save_configuration(self) -> None:
         """Save current settings to config file"""
