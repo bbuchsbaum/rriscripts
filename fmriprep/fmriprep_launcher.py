@@ -481,14 +481,14 @@ if [[ "$RUNTIME" == "singularity" ]]; then
     # Create cache directories for matplotlib and home
     mkdir -p "$SUBJECT_WORK_DIR/.matplotlib" "$SUBJECT_WORK_DIR/.cache" "$SUBJECT_WORK_DIR/.home"
     
-    "$RT_BIN" run --containall \\
+    "$RT_BIN" run --cleanenv \\
+      --home "$SUBJECT_WORK_DIR/.home" \\
+      --pwd /work \\
       -B "$BIDS_DIR:/data:ro" \\
       -B "$OUT_DIR:/out" \\
       -B "$SUBJECT_WORK_DIR:/work" \\
       -B "$FS_LICENSE:/opt/freesurfer/license.txt:ro" \\
       -B "$TEMPLATEFLOW_HOST:/opt/templateflow" \\
-      -B /etc/passwd:/etc/passwd:ro \\
-      -B /etc/group:/etc/group:ro \\
       "$CONTAINER" \\
       /data /out $CLI_BASE_STR --participant-label "${{SUBJECT_ID}}" --work-dir /work --fs-license-file /opt/freesurfer/license.txt
     
