@@ -472,10 +472,14 @@ if [[ "$RUNTIME" == "singularity" ]]; then
     local SUBJECT_ID="${{1#sub-}}"
     echo "Starting fMRIPrep for sub-${{SUBJECT_ID}}..."
     
+    # Create unique work directory for this subject to avoid conflicts
+    local SUBJECT_WORK_DIR="${{WORK_DIR}}/sub-${{SUBJECT_ID}}"
+    mkdir -p "$SUBJECT_WORK_DIR"
+    
     "$RT_BIN" run --cleanenv \\
       -B "$BIDS_DIR:/data:ro" \\
       -B "$OUT_DIR:/out" \\
-      -B "$WORK_DIR:/work" \\
+      -B "$SUBJECT_WORK_DIR:/work" \\
       -B "$FS_LICENSE:/opt/freesurfer/license.txt:ro" \\
       -B "$TEMPLATEFLOW_HOST:/opt/templateflow" \\
       "$CONTAINER" \\
@@ -515,10 +519,14 @@ elif [[ "$RUNTIME" == "docker" ]]; then
     local SUBJECT_ID="${{1#sub-}}"
     echo "Starting fMRIPrep for sub-${{SUBJECT_ID}} with Docker..."
     
+    # Create unique work directory for this subject to avoid conflicts
+    local SUBJECT_WORK_DIR="${{WORK_DIR}}/sub-${{SUBJECT_ID}}"
+    mkdir -p "$SUBJECT_WORK_DIR"
+    
     docker run --rm \\
       -v "$BIDS_DIR:/data:ro" \\
       -v "$OUT_DIR:/out" \\
-      -v "$WORK_DIR:/work" \\
+      -v "$SUBJECT_WORK_DIR:/work" \\
       -v "$FS_LICENSE:/opt/freesurfer/license.txt:ro" \\
       "$CONTAINER" \\
       /data /out $CLI_BASE_STR --participant-label "${{SUBJECT_ID}}" --fs-license-file /opt/freesurfer/license.txt --work-dir /work
