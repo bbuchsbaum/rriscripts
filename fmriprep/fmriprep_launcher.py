@@ -387,15 +387,30 @@ FS_RECONALL="{fs_reconall}"
 USE_SYN_SDC="{use_syn_sdc}"
 
 # ===== Derived settings =====
-SUBJECTS=($(grep -v '^#' "$SUBJECT_LIST_FILE" | sed '/^$/d'))
-SUB=${{SUBJECTS[$SLURM_ARRAY_TASK_ID]}}
-if [[ -z "$SUB" ]]; then
-  echo "No subject for index $SLURM_ARRAY_TASK_ID"; exit 1;
+# Read subject line (may contain multiple space-separated subjects if batching)
+mapfile -t SUBJECT_LINES < <(grep -v '^#' "$SUBJECT_LIST_FILE" | sed '/^$/d')
+SUBJECT_LINE="${{SUBJECT_LINES[$SLURM_ARRAY_TASK_ID]}}"
+if [[ -z "$SUBJECT_LINE" ]]; then
+  echo "No subject(s) for index $SLURM_ARRAY_TASK_ID"; exit 1;
 fi
+
+# Parse subjects from line (space-separated if batching)
+IFS=' ' read -ra SUBJECTS <<< "$SUBJECT_LINE"
+echo "=== Processing ${{#SUBJECTS[@]}} subject(s) in this job ==="
+for SUB in "${{SUBJECTS[@]}}"; do
+  echo "  - $SUB"
+done
+
+# Build participant labels (remove sub- prefix)
+LABELS=()
+for SUB in "${{SUBJECTS[@]}}"; do
+  LABELS+=("${{SUB#sub-}}")
+done
 
 mkdir -p "$OUT_DIR" "$WORK_DIR" "{log_dir}"
 
-CLI=(participant --participant-label "${{SUB#sub-}}" --nprocs "$NPROCS" --omp-nthreads "$OMP_THREADS" --mem-mb "$MEM_MB" --notrack)
+# Build CLI with all participant labels
+CLI=(participant --participant-label "${{LABELS[@]}}" --nprocs "$NPROCS" --omp-nthreads "$OMP_THREADS" --mem-mb "$MEM_MB" --notrack)
 
 if [[ "$SKIP_BIDS_VAL" == "1" ]]; then
   CLI+=(--skip-bids-validation)
@@ -419,10 +434,10 @@ if [[ -n "$EXTRA_FLAGS" ]]; then
   CLI+=($EXTRA_FLAGS)
 fi
 
-echo "=== Running fMRIPrep for $SUB on $HOSTNAME ==="
+echo "=== Running fMRIPrep on $HOSTNAME ==="
 echo "Runtime: $RUNTIME"
 echo "Container: $CONTAINER"
-echo "Command: $RUNTIME ... $SUB"
+echo "Subjects: ${{SUBJECTS[@]}}"
 echo "----------------------------------------------"
 
 # Setup TemplateFlow directory (use TEMPLATEFLOW_HOME if set, otherwise default)
