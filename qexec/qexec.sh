@@ -34,6 +34,7 @@ ACCOUNT="rrg-brad"
 NOX11=false
 OMP_NUM_THREADS=1
 LOG_DIR="${QEXEC_LOG_DIR:-}"  # Use environment variable if set, otherwise empty
+DRY_RUN=false
 
 # Help message
 usage() {
@@ -51,6 +52,7 @@ usage() {
     echo "      --nox11            Disable X11 forwarding (default: false)."
     echo "  -o, --omp_num_threads  Number of OpenMP threads (default: 1)."
     echo "  -l, --log-dir          Directory for log output (default: current dir or \$QEXEC_LOG_DIR)."
+    echo "  -d, --dry-run          Show computed SLURM command and exit."
     echo ""
     echo "Arguments:"
     echo "  <command>              Command to execute in the job (required unless interactive mode is used)."
@@ -58,11 +60,13 @@ usage() {
 }
 
 # Parse arguments
-# Check if enhanced getopt is available
-if getopt --test > /dev/null; then
+# Detect GNU enhanced getopt reliably: it returns status 4 for `-T`
+getopt -T >/dev/null 2>&1
+GETOPT_STATUS=$?
+if [ $GETOPT_STATUS -eq 4 ]; then
     # Use enhanced getopt for robust parsing
-    SHORT_OPTS="t:im:n:j:a:o:l:h"
-    LONG_OPTS="time:,interactive,mem:,ncpus:,nodes:,name:,array:,account:,nox11,omp_num_threads:,log-dir:,help"
+    SHORT_OPTS="t:im:n:j:a:o:l:hd"
+    LONG_OPTS="time:,interactive,mem:,ncpus:,nodes:,name:,array:,account:,nox11,omp_num_threads:,log-dir:,help,dry-run"
     PARSED_OPTIONS=$(getopt --options $SHORT_OPTS --longoptions $LONG_OPTS --name "$0" -- "$@")
     if [[ $? -ne 0 ]]; then
         usage
@@ -99,6 +103,8 @@ if getopt --test > /dev/null; then
                 OMP_NUM_THREADS="$2"; shift 2 ;;
             -l|--log-dir)
                 LOG_DIR="$2"; shift 2 ;;
+            -d|--dry-run)
+                DRY_RUN=true; shift ;;
             -h|--help)
                 usage ;;
             --)
@@ -110,18 +116,33 @@ if getopt --test > /dev/null; then
 else
     # Fallback to basic manual parsing if enhanced getopt is not available
     echo "Warning: Enhanced getopt not found. Using basic argument parsing." >&2
+    echo "Hint: Place qexec options before the command, or use -- to separate." >&2
+
+    # Parse options but preserve the original command tokens as-is
+    CMD_PARTS=()
     while [[ "$#" -gt 0 ]]; do
-        case $1 in
-            -t|--time) TIME="$2"; shift ;;       # Note: Original shift logic retained for fallback
-            -i|--interactive) INTERACTIVE=true ;; # Note: Original shift logic retained for fallback
-            -m|--mem) MEM="$2"; shift ;;          # Note: Original shift logic retained for fallback
-            -n|--ncpus) NCPUS="$2"; shift ;;       # Note: Original shift logic retained for fallback
-            --nodes) NODES="$2"; shift ;;       # Note: Original shift logic retained for fallback
-            -j|--name) JOB_NAME="$2"; shift ;;    # Note: Original shift logic retained for fallback
+        case "$1" in
+            -t|--time)
+                if [[ $# -lt 2 ]]; then echo "Error: $1 requires a value" >&2; usage; fi
+                TIME="$2"; CMD_PARTS+=("$1" "$2"); shift 2; continue ;;
+            -i|--interactive)
+                INTERACTIVE=true; CMD_PARTS+=("$1"); shift; continue ;;
+            -m|--mem)
+                if [[ $# -lt 2 ]]; then echo "Error: $1 requires a value" >&2; usage; fi
+                MEM="$2"; CMD_PARTS+=("$1" "$2"); shift 2; continue ;;
+            -n|--ncpus)
+                if [[ $# -lt 2 ]]; then echo "Error: $1 requires a value" >&2; usage; fi
+                NCPUS="$2"; CMD_PARTS+=("$1" "$2"); shift 2; continue ;;
+            --nodes)
+                if [[ $# -lt 2 ]]; then echo "Error: $1 requires a value" >&2; usage; fi
+                NODES="$2"; CMD_PARTS+=("$1" "$2"); shift 2; continue ;;
+            -j|--name)
+                if [[ $# -lt 2 ]]; then echo "Error: $1 requires a value" >&2; usage; fi
+                JOB_NAME="$2"; CMD_PARTS+=("$1" "$2"); shift 2; continue ;;
             -a|--array)
-                if [[ "$2" =~ ^[0-9]+(-[0-9]+)?(%[0-9]+)?$ ]]; then # Use updated regex for consistency
-                    ARRAY="$2"
-                    shift
+                if [[ $# -lt 2 ]]; then echo "Error: $1 requires a value" >&2; usage; fi
+                if [[ "$2" =~ ^[0-9]+(-[0-9]+)?(%[0-9]+)?$ ]]; then
+                    ARRAY="$2"; CMD_PARTS+=("$1" "$2"); shift 2; continue
                 else
                     echo "Error: --array requires a valid range (e.g., 1-5 or 1-10%2)" >&2
                     usage
@@ -129,24 +150,40 @@ else
                 ;;
             --array=*)
                 ARRAY_VAL="${1#--array=}"
-                if [[ "$ARRAY_VAL" =~ ^[0-9]+(-[0-9]+)?(%[0-9]+)?$ ]]; then # Use updated regex for consistency
-                    ARRAY="$ARRAY_VAL"
+                if [[ "$ARRAY_VAL" =~ ^[0-9]+(-[0-9]+)?(%[0-9]+)?$ ]]; then
+                    ARRAY="$ARRAY_VAL"; CMD_PARTS+=("$1"); shift; continue
                 else
                     echo "Error: --array requires a valid range (e.g., 1-5 or 1-10%2)" >&2
                     usage
                 fi
                 ;;
-            --account) ACCOUNT="$2"; shift ;;   # Note: Original shift logic retained for fallback
-            --nox11) NOX11=true ;;             # Note: Original shift logic retained for fallback
-            -o|--omp_num_threads) OMP_NUM_THREADS="$2"; shift ;; # Note: Original shift logic retained for fallback
-            -l|--log-dir) LOG_DIR="$2"; shift ;;  # Note: Original shift logic retained for fallback
-            -h|--help) usage ;;
-            --) shift; COMMAND="$*"; break ;;
-            -*) echo "Error: Unknown option: $1"; usage ;;
-            *) COMMAND="$*"; break ;;
+            --account)
+                if [[ $# -lt 2 ]]; then echo "Error: $1 requires a value" >&2; usage; fi
+                ACCOUNT="$2"; CMD_PARTS+=("$1" "$2"); shift 2; continue ;;
+            --nox11)
+                NOX11=true; CMD_PARTS+=("$1"); shift; continue ;;
+            -o|--omp_num_threads)
+                if [[ $# -lt 2 ]]; then echo "Error: $1 requires a value" >&2; usage; fi
+                OMP_NUM_THREADS="$2"; CMD_PARTS+=("$1" "$2"); shift 2; continue ;;
+            -l|--log-dir)
+                if [[ $# -lt 2 ]]; then echo "Error: $1 requires a value" >&2; usage; fi
+                LOG_DIR="$2"; CMD_PARTS+=("$1" "$2"); shift 2; continue ;;
+            -d|--dry-run)
+                DRY_RUN=true; shift; continue ;;
+            -h|--help)
+                usage ;;
+            --)
+                CMD_PARTS+=("$1"); shift
+                # Remainder is part of the command unchanged
+                while [[ "$#" -gt 0 ]]; do CMD_PARTS+=("$1"); shift; done
+                break ;;
+            *)
+                # Unrecognized or positional token; keep it as part of the command
+                CMD_PARTS+=("$1"); shift; continue ;;
         esac
-        shift # Note: Original shift logic retained for fallback
     done
+    # Reconstruct the command string preserving spacing
+    COMMAND="${CMD_PARTS[*]}"
 fi
 
 # Validate required arguments
@@ -173,25 +210,39 @@ if [ "$INTERACTIVE" == "true" ]; then
     if [ "$NOX11" == "false" ]; then
         SALLOC_CMD+=" --x11"
     fi
+    if [ "$DRY_RUN" = true ]; then
+        echo "Dry-run: Parsed arguments:"
+        echo "  TIME=$TIME (minutes=$TIME_MINUTES)"
+        echo "  NCPUS=$NCPUS"
+        echo "  NODES=$NODES"
+        echo "  ARRAY=$ARRAY"
+        echo "  MEM=${MEM:-}"
+        echo "  ACCOUNT=$ACCOUNT"
+        echo "Dry-run: Would execute interactive command:"
+        echo "$SALLOC_CMD"
+        exit 0
+    fi
     execute_command "$SALLOC_CMD"
 else
     # Batch job: use sbatch
-    JOB_SCRIPT=$(mktemp)
-    {
-        echo "#!/bin/bash"
-        echo "export OMP_NUM_THREADS=${OMP_NUM_THREADS}"
-        echo "export MKL_NUM_THREADS=${OMP_NUM_THREADS}"
-        # Expand home directory and clean up command
-        CLEAN_CMD=$(echo "$COMMAND" | sed "s|~/bin|$HOME/bin|g" | sed 's/--array=[0-9-]*//')
-        # Use eval to execute the command string, preserving special characters
-        # Single quotes prevent premature expansion in the here-doc/echo context
-        # Double quotes around $CLEAN_CMD inside eval allow variable expansion *within* the command on the node
-        echo 'eval "'$CLEAN_CMD'"'
-    } > "$JOB_SCRIPT"
-    
-    echo "Debug: Contents of $JOB_SCRIPT:"
-    cat "$JOB_SCRIPT"
-    
+    JOB_SCRIPT=""
+    if [ "$DRY_RUN" != true ]; then
+        JOB_SCRIPT=$(mktemp)
+        {
+            echo "#!/bin/bash"
+            echo "export OMP_NUM_THREADS=${OMP_NUM_THREADS}"
+            echo "export MKL_NUM_THREADS=${OMP_NUM_THREADS}"
+            # Expand home directory and clean up command
+            CLEAN_CMD=$(echo "$COMMAND" | sed "s|~/bin|$HOME/bin|g" | sed 's/--array=[0-9-]*//')
+            # Use eval to execute the command string, preserving special characters
+            # Single quotes prevent premature expansion in the here-doc/echo context
+            # Double quotes around $CLEAN_CMD inside eval allow variable expansion *within* the command on the node
+            echo 'eval "'$CLEAN_CMD'"'
+        } > "$JOB_SCRIPT"
+        echo "Debug: Contents of $JOB_SCRIPT:"
+        cat "$JOB_SCRIPT"
+    fi
+
     TIME_MINUTES=$((TIME * 60))
     SBATCH_ARGS=""
     [ -n "$ARRAY" ] && SBATCH_ARGS+=" --array=${ARRAY}"
@@ -207,13 +258,31 @@ else
         SBATCH_ARGS+=" --error=${LOG_DIR}/slurm-%j.err"
     fi
 
-    SBATCH_CMD="sbatch $SBATCH_ARGS $JOB_SCRIPT"
+    SBATCH_CMD="sbatch $SBATCH_ARGS ${JOB_SCRIPT}"
     echo "Debug: ARRAY=$ARRAY"
     echo "Debug: SBATCH_ARGS=$SBATCH_ARGS"
     echo "Debug: Full command being executed:"
     echo "$COMMAND"
+    if [ "$DRY_RUN" = true ]; then
+        echo "Dry-run: Parsed arguments:"
+        echo "  TIME=$TIME (minutes=$TIME_MINUTES)"
+        echo "  NCPUS=$NCPUS"
+        echo "  NODES=$NODES"
+        echo "  ARRAY=$ARRAY"
+        echo "  MEM=${MEM:-}"
+        echo "  ACCOUNT=$ACCOUNT"
+        echo "Dry-run: Would submit batch command:"
+        echo "$SBATCH_CMD"
+        echo "Dry-run: Job script content would be:"
+        echo "#!/bin/bash"
+        echo "export OMP_NUM_THREADS=${OMP_NUM_THREADS}"
+        echo "export MKL_NUM_THREADS=${OMP_NUM_THREADS}"
+        CLEAN_CMD=$(echo "$COMMAND" | sed "s|~/bin|$HOME/bin|g" | sed 's/--array=[0-9-]*//')
+        echo "eval \"$CLEAN_CMD\""
+        exit 0
+    fi
+
     execute_command "$SBATCH_CMD"
-    
     # Clean up temporary job script
     trap 'rm -f "$JOB_SCRIPT"' EXIT
 fi
