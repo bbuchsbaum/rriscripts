@@ -56,14 +56,13 @@ import os
 import re
 import shlex
 import shutil
-import signal
 import subprocess
 import sys
 import time
-from collections import defaultdict, deque, namedtuple
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set, Tuple, TypeVar, Callable
+from typing import Dict, List, Optional, Set, Tuple, TypeVar, Callable
 
 # System constants
 CLK_TCK = os.sysconf(os.sysconf_names['SC_CLK_TCK'])
@@ -253,22 +252,34 @@ def scontrol_available() -> bool:
     return shutil.which('scontrol') is not None
 
 def scontrol_listpids(jobid: str) -> List[int]:
-    # Output varies; we just extract all integers after "Pid=" or "PID=" and filter by /proc existence.
+    """Return PIDs for a Slurm job/step via `scontrol listpids`.
+
+    Handles both `Pid=123`/`PID=123` formats and bare numeric listings.
+    Filters to currently-running processes present under /proc.
+    """
     if not scontrol_available():
         return []
     try:
-        out = subprocess.check_output(['scontrol', 'listpids', jobid], text=True, stderr=subprocess.DEVNULL)
-        # Catch both "Pid=" and "PID=" (cases differ by version).
-        pids = set(int(x.split('=')[1]) for x in re.findall(r'(?:Pid|PID)=(\d+)', out))
-        # Some versions print bare PIDs; capture those too:
-        pids |= set(int(x) for x in re.findall(r'\b(\d{2,})\b', out) if x.isdigit())
-        return [pid for pid in pids if os.path.exists(f'/proc/{pid}')]
+        out = subprocess.check_output(
+            ['scontrol', 'listpids', jobid], text=True, stderr=subprocess.DEVNULL
+        )
     except subprocess.CalledProcessError as e:
         logging.debug(f"scontrol listpids failed for job {jobid}: {e}")
         return []
     except Exception as e:
-        logging.error(f"Unexpected error in scontrol_listpids: {e}")
+        logging.error(f"Unexpected error invoking scontrol for job {jobid}: {e}")
         return []
+
+    pids: Set[int] = set()
+    try:
+        # Explicit key-value style, e.g., "Pid=123" or "PID=123"
+        pids.update(int(m) for m in re.findall(r'(?:Pid|PID)=(\d+)', out))
+        # Some versions print bare PIDs; capture 2+ digit numbers and rely on /proc filter below.
+        pids.update(int(m) for m in re.findall(r'\b(\d{2,})\b', out))
+    except Exception as e:
+        logging.debug(f"Parsing scontrol output for job {jobid} failed: {e}")
+
+    return [pid for pid in pids if os.path.exists(f'/proc/{pid}')]
 
 @retry_on_failure(max_retries=2, exceptions=(IOError, OSError))
 def cgroup_paths_for_pid(pid: int) -> Dict[str, str]:
@@ -644,8 +655,6 @@ class UIState:
 def draw(stdscr, state: UIState) -> None:
     curses.curs_set(0)
     stdscr.nodelay(True)
-    last_samples = {}
-    last_time = time.time()
     # initial pidset
     pidset = set(resolve_target_pids(state.jobid, state.stepid, state.pid_root))
     state.last_pidset = pidset
@@ -653,7 +662,6 @@ def draw(stdscr, state: UIState) -> None:
 
     while True:
         h, w = stdscr.getmaxyx()
-        now = time.time()
         interval = max(0.1, state.interval)
         # refresh pidset occasionally (workers may move)
         pidset = set(resolve_target_pids(state.jobid, state.stepid, state.pid_root))
@@ -807,8 +815,9 @@ def main():
 
     args = parser.parse_args()
 
-    # Sanity: some HPC nodes have TERM=unknown; set a safe default for curses
-    if not os.environ.get('TERM'):
+    # Sanity: some HPC nodes set TERM empty/unknown/dumb; set a safe default for curses
+    term = os.environ.get('TERM', '').lower()
+    if term in ('', 'unknown', 'dumb'):
         os.environ['TERM'] = DEFAULT_TERMINAL
 
     if args.once:
