@@ -15,6 +15,8 @@ set qexec_account "rrg-brad" ;# Default account
 set qexec_omp_threads "1"
 set qexec_interactive 0 ;# 0 for false, 1 for true
 set qexec_nox11 0       ;# 0 for false, 1 for true
+set qexec_log_dir ""
+set qexec_dry_run 0
 
 
 # --- GUI Layout ---
@@ -36,7 +38,7 @@ grid .options.lbl_cmd -row 0 -column 0 -sticky w -padx 2 -pady 2
 grid .options.ent_cmd -row 0 -column 1 -columnspan 3 -sticky ew -padx 2 -pady 2
 
 # Time & CPUs (Row 1)
-label .options.lbl_time -text "Time (hrs):"
+label .options.lbl_time -text "Time (hours, integer):"
 entry .options.ent_time -textvariable qexec_time -width 8
 label .options.lbl_ncpus -text "CPUs:"
 entry .options.ent_ncpus -textvariable qexec_ncpus -width 8
@@ -81,6 +83,14 @@ checkbutton .options.chk_nox11 -text "Disable X11" -variable qexec_nox11
 grid .options.chk_interactive -row 5 -column 0 -columnspan 2 -sticky w -padx 2 -pady 2
 grid .options.chk_nox11       -row 5 -column 2 -columnspan 2 -sticky w -padx 2 -pady 2
 
+# Log Dir and Dry-Run (Row 6)
+label .options.lbl_logdir -text "Log Dir:"
+entry .options.ent_logdir -textvariable qexec_log_dir -width 30
+checkbutton .options.chk_dryrun -text "Dry Run" -variable qexec_dry_run
+grid .options.lbl_logdir  -row 6 -column 0 -sticky w -padx 2 -pady 2
+grid .options.ent_logdir  -row 6 -column 1 -sticky ew -padx 2 -pady 2
+grid .options.chk_dryrun  -row 6 -column 2 -columnspan 2 -sticky w -padx 2 -pady 2
+
 
 # Frame for buttons
 frame .buttons
@@ -113,13 +123,17 @@ proc submitJob {} {
 
     # Find the qexec.sh script (adjust path if necessary)
     # Assumes qexec.sh is in the same directory or in PATH
-    set qexec_script "./qexec.sh" ;# Or provide full path /path/to/qexec.sh
-
-    # Basic check if qexec.sh exists and is executable
+    # Prefer qexec.sh next to this GUI script; fallback to PATH
+    set here [file dirname [file normalize [info script]]]
+    set qexec_script [file join $here qexec.sh]
     if {![file exists $qexec_script] || ![file executable $qexec_script]} {
-         tk_messageBox -icon error -type ok -title "Error" \
-             -message "qexec.sh not found or not executable at:\n$qexec_script\nPlease check the path in qexec_gui.tcl."
-         return
+        set candidate [auto_execok qexec.sh]
+        if {$candidate eq ""} {
+            tk_messageBox -icon error -type ok -title "Error" \
+                -message "qexec.sh not found next to GUI or in PATH.\nChecked: $qexec_script"
+            return
+        }
+        set qexec_script $candidate
     }
 
     # Base command list
@@ -132,15 +146,12 @@ proc submitJob {} {
         lappend cmd_list "-i"
     }
 
-    # Time
+    # Time (integer hours to match qexec.sh)
     if {[string trim $qexec_time] ne ""} {
-        # Allow HH:MM:SS or just hours (integer) - basic check
-        if {([string is integer -strict $qexec_time] && $qexec_time > 0) || \
-            [regexp {^[0-9]+:[0-5][0-9]:[0-5][0-9]$} $qexec_time] || \
-            [regexp {^[0-9]+-[0-9]+:[0-5][0-9]:[0-5][0-9]$} $qexec_time]} {
+        if {[string is integer -strict $qexec_time] && $qexec_time > 0} {
              lappend cmd_list "-t" $qexec_time
         } else {
-            tk_messageBox -icon error -type ok -title "Error" -message "Invalid Time format. Use hours (e.g., 1), HH:MM:SS, or D-HH:MM:SS."
+            tk_messageBox -icon error -type ok -title "Error" -message "Time must be a positive integer (hours)."
             return
         }
     } else {
@@ -183,14 +194,13 @@ proc submitJob {} {
         lappend cmd_list "-j" $qexec_job_name
     }
 
-    # Array (Optional)
+    # Array (Optional, single range or range%stride to match qexec.sh)
     if {[string trim $qexec_array] ne ""} {
-         # Regex allows formats like 1, 1-5, 1-10%2
-        if {[regexp {^[0-9]+((-[0-9]+)?(%[0-9]+)?)?(,[0-9]+((-[0-9]+)?(%[0-9]+)?))*$} $qexec_array]} {
+        if {[regexp {^[0-9]+(-[0-9]+)?(%[0-9]+)?$} $qexec_array]} {
             lappend cmd_list "-a" $qexec_array
         } else {
-             tk_messageBox -icon error -type ok -title "Error" -message "Invalid Array format. Use e.g., 1-5, 1,3,5, 1-10%2."
-             return
+             tk_messageBox -icon error -type ok -title "Error" -message "Invalid Array format. Use e.g., 1-5 or 1-10%2."
+            return
         }
     }
 
@@ -215,6 +225,16 @@ proc submitJob {} {
     # NoX11 Flag
     if {$qexec_nox11} {
         lappend cmd_list "--nox11"
+    }
+
+    # Log Dir
+    if {[string trim $qexec_log_dir] ne ""} {
+        lappend cmd_list "-l" $qexec_log_dir
+    }
+
+    # Dry Run
+    if {$qexec_dry_run} {
+        lappend cmd_list "-d"
     }
 
     # Add the command itself if not interactive
@@ -245,7 +265,7 @@ proc submitJob {} {
 
     # Execute the command in the background to keep GUI responsive
     # Using 'catch' to handle potential errors during execution
-    if {[catch {exec {*}$cmd_list >@ stdout &} pid]} {
+    if {[catch {exec {*}$cmd_list >@ stdout 2>@ stdout &} pid]} {
         # Error launching
         destroy .status
         tk_messageBox -icon error -type ok -title "Launch Error" -message "Error executing qexec.sh:\n$pid"
