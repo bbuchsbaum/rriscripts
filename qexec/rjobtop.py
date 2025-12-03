@@ -48,11 +48,15 @@ Notes & caveats
     lived < the refresh interval, but the CPU/Memory aggregates *do*.
 """
 
+from __future__ import annotations
+
 import argparse
 import curses
 import functools
+import json
 import logging
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -88,11 +92,20 @@ RETRY_DELAY = 0.01  # Delay between retries in seconds
 
 # Setup logging
 log_file = Path.home() / '.rjobtop.log'
-logging.basicConfig(
-    filename=str(log_file),
-    level=logging.WARNING,
-    format='%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'
-)
+
+def configure_logging() -> None:
+    """Try to log to ~/.rjobtop.log; fall back to stderr if not writable."""
+    kwargs = dict(
+        level=logging.WARNING,
+        format='%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'
+    )
+    try:
+        logging.basicConfig(filename=str(log_file), **kwargs)
+    except (PermissionError, OSError) as e:
+        logging.basicConfig(**kwargs)
+        logging.warning("Falling back to stderr logging: %s", e)
+
+configure_logging()
 
 # Type variable for decorator
 T = TypeVar('T')
@@ -251,6 +264,30 @@ def list_all_pids() -> List[int]:
 def scontrol_available() -> bool:
     return shutil.which('scontrol') is not None
 
+def sstat_listpids(jobid: str, stepid: Optional[str]) -> List[int]:
+    if not shutil.which('sstat'):
+        return []
+    step = stepid if stepid else 'batch'
+    try:
+        out = subprocess.check_output(
+            ['sstat', '--noheader', '--format', 'AID', '--jobs', f'{jobid}.{step}'],
+            text=True, stderr=subprocess.DEVNULL
+        )
+        pids = []
+        for line in out.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            # sstat AID is stepid.batchid? Maybe parse integers only
+            try:
+                pid = int(line)
+                pids.append(pid)
+            except ValueError:
+                continue
+        return pids
+    except Exception:
+        return []
+
 def scontrol_listpids(jobid: str) -> List[int]:
     """Return PIDs for a Slurm job/step via `scontrol listpids`.
 
@@ -332,21 +369,96 @@ def read_cgroup_memory_bytes(kind_path: Tuple[str, str]) -> Optional[int]:
         return None
     return None
 
-def show_job_summary_once(jobid: Optional[str], stepid: Optional[str], pid_root: Optional[int],
-                          pattern: Optional[str], interval: float) -> int:
+def collect_snapshot(jobid: Optional[str], stepid: Optional[str], pid_root: Optional[int],
+                     pattern: Optional[str], interval: float) -> Tuple[int, Optional[Aggregates]]:
     pidset = set(resolve_target_pids(jobid, stepid, pid_root))
     if not pidset:
-        print("No target PIDs found. Are you on the right node or did you pass --job/--pid?")
-        return 2
+        # fallback: sstat-only summary if job known but no PIDs (e.g., cgroup v2 filtering)
+        if jobid:
+            summary = sstat_summary(jobid, stepid)
+            if summary:
+                agg = Aggregates(
+                    now=time.time(), jobid=jobid, stepid=stepid, pid_root=pid_root,
+                    pid_count=0, new_pids=0, died_pids=0, fork_rate_hz=0.0,
+                    total_cpu_cores=summary.get("cpu_cores", 0.0),
+                    total_rss_bytes=summary.get("rss_bytes", 0),
+                    cgroup_mem_bytes=None,
+                    cpu_hist=deque(maxlen=HISTORY_SIZE),
+                    mem_hist=deque(maxlen=HISTORY_SIZE),
+                    rows=[],
+                    alloc_cpus=None,
+                    mem_total_bytes=None,
+                )
+                return 0, agg
+        return 2, None
     samples1 = sample_procs(pidset)
     time.sleep(interval)
     samples2 = sample_procs(pidset)
     if not samples1 or not samples2:
-        print("Failed to sample processes.")
-        return 3
-    agg = aggregate(samples1, samples2, interval, pattern)
-    # Print a textual snapshot
-    print_text_snapshot(agg, jobid, stepid, pid_root, interval)
+        return 3, None
+    compiled = None
+    if pattern and validate_regex(pattern):
+        try:
+            compiled = re.compile(pattern)
+        except re.error:
+            compiled = None
+    agg = aggregate(samples1, samples2, interval, pattern, compiled_regex=compiled)
+    agg.jobid = jobid
+    agg.stepid = stepid
+    agg.pid_root = pid_root
+    agg.alloc_cpus = agg.alloc_cpus or (get_alloc_cpus(jobid) if jobid else None)
+    return 0, agg
+
+def serialize_agg(agg: Aggregates, jobid: Optional[str], stepid: Optional[str],
+                  pid_root: Optional[int], interval: float, node: Optional[str] = None) -> Dict:
+    mem_used = agg.cgroup_mem_bytes if agg.cgroup_mem_bytes is not None else agg.total_rss_bytes
+    return {
+        "node": node or platform.node(),
+        "timestamp": agg.now,
+        "jobid": jobid,
+        "stepid": stepid,
+        "pid_root": pid_root,
+        "interval": interval,
+        "pid_count": agg.pid_count,
+        "new_pids": agg.new_pids,
+        "died_pids": agg.died_pids,
+        "fork_rate_hz": agg.fork_rate_hz,
+        "total_cpu_cores": agg.total_cpu_cores,
+        "total_rss_bytes": agg.total_rss_bytes,
+        "cgroup_mem_bytes": agg.cgroup_mem_bytes,
+        "mem_used_bytes": mem_used,
+        "alloc_cpus": agg.alloc_cpus,
+        "mem_total_bytes": agg.mem_total_bytes,
+        "rows": [
+            {
+                "pid": r.pid,
+                "ppid": r.ppid,
+                "comm": r.comm,
+                "cpu_cores": r.cpu_cores,
+                "rss_bytes": r.rss_bytes,
+                "age_s": r.age_s,
+                "cmdline": r.cmdline,
+            }
+            for r in agg.rows[:MAX_TABLE_ROWS]
+        ],
+        "source": "sstat" if agg.pid_count == 0 and not agg.rows else "proc",
+    }
+
+def show_job_summary_once(jobid: Optional[str], stepid: Optional[str], pid_root: Optional[int],
+                          pattern: Optional[str], interval: float,
+                          output_json: bool = False, node_name: Optional[str] = None) -> int:
+    rc, agg = collect_snapshot(jobid, stepid, pid_root, pattern, interval)
+    if rc != 0 or agg is None:
+        if rc == 2:
+            print("No target PIDs found. Are you on the right node or did you pass --job/--pid?")
+        elif rc == 3:
+            print("Failed to sample processes.")
+        return rc
+    if output_json:
+        payload = serialize_agg(agg, jobid, stepid, pid_root, interval, node=node_name)
+        print(json.dumps(payload))
+    else:
+        print_text_snapshot(agg, jobid, stepid, pid_root, interval)
     return 0
 
 def human_bytes(n: float) -> str:
@@ -389,6 +501,20 @@ def read_meminfo_total_bytes() -> Optional[int]:
         return None
     return None
 
+def discover_job_nodes(jobid: str) -> List[str]:
+    """Return list of node hostnames for the job via scontrol."""
+    try:
+        out = subprocess.check_output(['scontrol', 'show', 'job', jobid], text=True)
+        m = re.search(r'NodeList=(\S+)', out)
+        if not m:
+            return []
+        nodelist = m.group(1)
+        hosts = subprocess.check_output(['scontrol', 'show', 'hostnames', nodelist], text=True)
+        return [h.strip() for h in hosts.splitlines() if h.strip()]
+    except Exception as e:
+        logging.warning(f"Failed to discover nodes for job {jobid}: {e}")
+        return []
+
 def get_alloc_cpus(jobid: Optional[str]) -> Optional[int]:
     if not jobid or not scontrol_available():
         return None
@@ -414,6 +540,9 @@ def resolve_target_pids(jobid: Optional[str], stepid: Optional[str], pid_root: O
         pids = scontrol_listpids(jobid if not stepid else f"{jobid}.{stepid}")
         if pids:
             return pids
+        sstat_pids = sstat_listpids(jobid, stepid)
+        if sstat_pids:
+            return sstat_pids
         # fallback: cgroup search via /proc/<pid>/cgroup containing job_<jobid>
         target = f"job_{jobid}"
         pids = []
@@ -596,6 +725,35 @@ def aggregate(s1: Dict[int, ProcSample], s2: Dict[int, ProcSample], interval: fl
                       cpu_hist=deque(maxlen=HISTORY_SIZE), mem_hist=deque(maxlen=HISTORY_SIZE),
                       rows=rows, alloc_cpus=None, mem_total_bytes=read_meminfo_total_bytes())
 
+def sstat_summary(jobid: str, stepid: Optional[str]) -> Optional[Dict[str, float]]:
+    """Use sstat to fetch CPUTime and MaxRSS as a fallback when /proc is unavailable."""
+    if not shutil.which('sstat'):
+        return None
+    step = stepid if stepid else 'batch'
+    try:
+        out = subprocess.check_output(
+            ['sstat', '--noheader', '--parsable2', '--format', 'AID,CPUTimeRAW,MaxRSS', '--jobs', f'{jobid}.{step}'],
+            text=True, stderr=subprocess.DEVNULL
+        )
+        cpu_secs = 0.0
+        rss_kb = 0.0
+        for line in out.splitlines():
+            parts = line.strip().split('|')
+            if len(parts) < 3:
+                continue
+            try:
+                cpu_secs += float(parts[1])
+            except ValueError:
+                pass
+            try:
+                rss_kb = max(rss_kb, float(parts[2]))
+            except ValueError:
+                pass
+        return {"cpu_cores": cpu_secs / max(1.0, DEFAULT_INTERVAL), "rss_bytes": int(rss_kb * 1024)}
+    except Exception as e:
+        logging.warning(f"sstat fallback failed: {e}")
+        return None
+
 def print_text_snapshot(agg: Aggregates, jobid: Optional[str], stepid: Optional[str], pid_root: Optional[int], interval: float):
     hdr = []
     if jobid:
@@ -614,6 +772,89 @@ def print_text_snapshot(agg: Aggregates, jobid: Optional[str], stepid: Optional[
     print(f"{'PID':>7} {'PPID':>7} {'CPU(cores)':>10} {'RSS':>10} {'AGE':>8}  COMM/CMD")
     for r in agg.rows[:15]:
         print(f"{r.pid:7d} {r.ppid:7d} {r.cpu_cores:10.2f} {human_bytes(r.rss_bytes):>10} {short_age(r.age_s):>8}  {r.comm}  ({r.cmdline[:80]})")
+
+def aggregate_summaries(summaries: List[Dict]) -> Dict:
+    def mem_used(s: Dict) -> int:
+        return int(s.get("mem_used_bytes") or s.get("cgroup_mem_bytes") or s.get("total_rss_bytes") or 0)
+    return {
+        "total_cpu_cores": sum(s.get("total_cpu_cores", 0.0) for s in summaries),
+        "total_mem_bytes": sum(mem_used(s) for s in summaries),
+        "pid_count": sum(s.get("pid_count", 0) for s in summaries),
+        "nodes": len(summaries),
+    }
+
+def print_multi_summary(summaries: List[Dict], totals: Dict):
+    print("Multi-node snapshot")
+    print("===================")
+    print(f"Nodes: {totals['nodes']} | PIDs: {totals['pid_count']} | CPU: {totals['total_cpu_cores']:.1f} cores | Mem: {human_bytes(totals['total_mem_bytes'])}")
+    print("\nPer-node:")
+    for s in summaries:
+        node = s.get("node", "<unknown>")
+        cpu = s.get("total_cpu_cores", 0.0)
+        mem = s.get("mem_used_bytes") or s.get("cgroup_mem_bytes") or s.get("total_rss_bytes") or 0
+        pids = s.get("pid_count", 0)
+        print(f"  {node:<20} CPU {cpu:6.1f} cores | Mem {human_bytes(mem):>8} | PIDs {pids}")
+
+def multi_node_snapshot(args) -> int:
+    if not args.job:
+        print("--multi requires --job")
+        return 2
+    nodes = []
+    if args.nodes:
+        nodes = [n.strip() for n in re.split(r'[,\s]+', args.nodes) if n.strip()]
+    else:
+        nodes = discover_job_nodes(args.job)
+    if not nodes:
+        print("Could not determine nodes for job; pass --nodes or ensure scontrol is available.")
+        return 3
+    script_path = Path(__file__).resolve()
+    summaries = []
+    for node in nodes:
+        cmd = [
+            'srun', '-N', '1', '-n', '1', '-w', node, '--quiet',
+            sys.executable, str(script_path),
+            '--job', args.job,
+            '--interval', str(args.interval),
+            '--once', '--json'
+        ]
+        if args.step:
+            cmd += ['--step', args.step]
+        if args.pid:
+            cmd += ['--pid', str(args.pid)]
+        if args.pattern:
+            cmd += ['--pattern', args.pattern]
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
+        except subprocess.CalledProcessError as e:
+            print(f"{node}: srun failed ({e.returncode}): {e.stderr or e.stdout or e}")
+            continue
+        except subprocess.TimeoutExpired:
+            print(f"{node}: srun timed out")
+            continue
+        json_line = None
+        for line in reversed(res.stdout.splitlines()):
+            if line.strip():
+                json_line = line.strip()
+                break
+        if not json_line:
+            print(f"{node}: no output")
+            continue
+        try:
+            payload = json.loads(json_line)
+            summaries.append(payload)
+        except json.JSONDecodeError as e:
+            print(f"{node}: failed to parse JSON: {e}")
+            logging.warning("JSON parse failed from %s: %s", node, json_line)
+            continue
+    if not summaries:
+        print("No data collected from any node.")
+        return 4
+    totals = aggregate_summaries(summaries)
+    if args.json:
+        print(json.dumps({"total": totals, "nodes": summaries}))
+    else:
+        print_multi_summary(summaries, totals)
+    return 0
 
 class UIState:
     def __init__(self, jobid: Optional[str], stepid: Optional[str], 
@@ -812,6 +1053,9 @@ def main():
                         help='Regex to include rows in table (aggregates still use all processes); default focuses on R')
     parser.add_argument('--interval', type=float, default=DEFAULT_INTERVAL, help=f'Refresh interval in seconds (default {DEFAULT_INTERVAL})')
     parser.add_argument('--once', action='store_true', help='Print a single snapshot and exit (no curses UI)')
+    parser.add_argument('--json', action='store_true', help='Output snapshot as JSON (implies --once)')
+    parser.add_argument('--multi', action='store_true', help='Collect one snapshot from each allocated node via srun (requires --job; implies --once)')
+    parser.add_argument('--nodes', help='Comma- or space-separated node list to sample (implies --multi)')
 
     args = parser.parse_args()
 
@@ -820,8 +1064,20 @@ def main():
     if term in ('', 'unknown', 'dumb'):
         os.environ['TERM'] = DEFAULT_TERMINAL
 
+    # Flags that imply --once
+    if args.json:
+        args.once = True
+    if args.nodes:
+        args.multi = True
+    if args.multi:
+        args.once = True
+
+    if args.multi:
+        rc = multi_node_snapshot(args)
+        sys.exit(rc)
     if args.once:
-        rc = show_job_summary_once(args.job, args.step, args.pid, args.pattern, args.interval)
+        rc = show_job_summary_once(args.job, args.step, args.pid, args.pattern, args.interval,
+                                   output_json=args.json)
         sys.exit(rc)
 
     state = UIState(jobid=args.job, stepid=args.step, pid_root=args.pid,

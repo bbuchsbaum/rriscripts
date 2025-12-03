@@ -10,7 +10,7 @@
 # Options:
 #   -t, --time             Time in hours to allocate for the job (default: "1").
 #   -i, --interactive      Submit an interactive job (default: false).
-#   -m, --mem              Amount of memory per node (default: "6G").
+#   -m, --mem              Amount of memory per node (default: not set).
 #   -n, --ncpus            Number of CPUs per task (default: "1").
 #       --nodes            Number of nodes (default: "1").
 #   -j, --name             Job name (default: "").
@@ -18,6 +18,7 @@
 #       --account          Account name (default: "rrg-brad").
 #       --nox11            Disable X11 forwarding (default: false).
 #   -o, --omp_num_threads  Number of OpenMP threads (default: 1).
+#       --no-mem           Do not pass --mem to Slurm (overrides -m/--mem).
 #
 # Arguments:
 #   <command>              Command to execute in the job (required unless interactive mode is used).
@@ -25,7 +26,7 @@
 # Default values
 TIME=1
 INTERACTIVE=false
-MEM=""
+MEM="${QEXEC_DEFAULT_MEM:-}"
 NCPUS=1
 NODES=1
 JOB_NAME=""
@@ -35,6 +36,11 @@ NOX11=false
 OMP_NUM_THREADS=1
 LOG_DIR="${QEXEC_LOG_DIR:-}"  # Use environment variable if set, otherwise empty
 DRY_RUN=false
+NO_MEM=false
+# If set (any value), skip adding --mem even if provided
+if [ -n "${QEXEC_DISABLE_MEM:-}" ]; then
+    NO_MEM=true
+fi
 
 # Help message
 usage() {
@@ -43,7 +49,7 @@ usage() {
     echo "Options:"
     echo "  -t, --time             Time in hours to allocate for the job (default: 1)."
     echo "  -i, --interactive      Submit an interactive job (default: false)."
-    echo "  -m, --mem              Amount of memory per node (default: 6G)."
+    echo "  -m, --mem              Amount of memory per node (default: not set)."
     echo "  -n, --ncpus            Number of CPUs per task (default: 1)."
     echo "      --nodes            Number of nodes (default: 1)."
     echo "  -j, --name             Job name (default: '')."
@@ -51,11 +57,16 @@ usage() {
     echo "      --account          Account name (default: rrg-brad)."
     echo "      --nox11            Disable X11 forwarding (default: false)."
     echo "  -o, --omp_num_threads  Number of OpenMP threads (default: 1)."
+    echo "      --no-mem           Do not pass --mem to Slurm (overrides -m/--mem)."
     echo "  -l, --log-dir          Directory for log output (default: current dir or \$QEXEC_LOG_DIR)."
     echo "  -d, --dry-run          Show computed SLURM command and exit."
     echo ""
     echo "Arguments:"
     echo "  <command>              Command to execute in the job (required unless interactive mode is used)."
+    echo ""
+    echo "Environment:"
+    echo "  QEXEC_DISABLE_MEM=1    Skip --mem even if provided (for whole-node clusters)."
+    echo "  QEXEC_DEFAULT_MEM=VAL  Default memory request unless disabled or overridden."
     exit 1
 }
 
@@ -66,7 +77,7 @@ GETOPT_STATUS=$?
 if [ $GETOPT_STATUS -eq 4 ]; then
     # Use enhanced getopt for robust parsing
     SHORT_OPTS="t:im:n:j:a:o:l:hd"
-    LONG_OPTS="time:,interactive,mem:,ncpus:,nodes:,name:,array:,account:,nox11,omp_num_threads:,log-dir:,help,dry-run"
+    LONG_OPTS="time:,interactive,mem:,ncpus:,nodes:,name:,array:,account:,nox11,omp_num_threads:,log-dir:,no-mem,help,dry-run"
     PARSED_OPTIONS=$(getopt --options $SHORT_OPTS --longoptions $LONG_OPTS --name "$0" -- "$@")
     if [[ $? -ne 0 ]]; then
         usage
@@ -103,6 +114,8 @@ if [ $GETOPT_STATUS -eq 4 ]; then
                 OMP_NUM_THREADS="$2"; shift 2 ;;
             -l|--log-dir)
                 LOG_DIR="$2"; shift 2 ;;
+            --no-mem)
+                NO_MEM=true; shift ;;
             -d|--dry-run)
                 DRY_RUN=true; shift ;;
             -h|--help)
@@ -168,6 +181,8 @@ else
             -l|--log-dir)
                 if [[ $# -lt 2 ]]; then echo "Error: $1 requires a value" >&2; usage; fi
                 LOG_DIR="$2"; CMD_PARTS+=("$1" "$2"); shift 2; continue ;;
+            --no-mem)
+                NO_MEM=true; CMD_PARTS+=("$1"); shift; continue ;;
             -d|--dry-run)
                 DRY_RUN=true; shift; continue ;;
             -h|--help)
@@ -196,6 +211,18 @@ fi
 export OMP_NUM_THREADS=$OMP_NUM_THREADS
 export MKL_NUM_THREADS=$OMP_NUM_THREADS
 
+# Determine whether to pass --mem
+USE_MEM=true
+if [ "$NO_MEM" = true ]; then
+    USE_MEM=false
+fi
+MEM_FLAG=""
+if [ "$USE_MEM" = true ] && [ -n "$MEM" ]; then
+    MEM_FLAG="--mem=${MEM}"
+elif [ "$USE_MEM" = false ] && [ -n "$MEM" ]; then
+    echo "Note: skipping --mem because memory requests are disabled (QEXEC_DISABLE_MEM or --no-mem)." >&2
+fi
+
 # Helper function to run commands with logging
 execute_command() {
     echo "Executing: $1"
@@ -206,7 +233,7 @@ if [ "$INTERACTIVE" == "true" ]; then
     # Interactive job: use salloc
     TIME_MINUTES=$((TIME * 60))
     SALLOC_CMD="salloc --time=${TIME_MINUTES} --account=${ACCOUNT} --cpus-per-task=${NCPUS} --nodes=${NODES}"
-    [ -n "$MEM" ] && SALLOC_CMD+=" --mem=${MEM}"
+    [ -n "$MEM_FLAG" ] && SALLOC_CMD+=" ${MEM_FLAG}"
     if [ "$NOX11" == "false" ]; then
         SALLOC_CMD+=" --x11"
     fi
@@ -217,6 +244,7 @@ if [ "$INTERACTIVE" == "true" ]; then
         echo "  NODES=$NODES"
         echo "  ARRAY=$ARRAY"
         echo "  MEM=${MEM:-}"
+        echo "  MEM_FLAG=${MEM_FLAG:-<none>}"
         echo "  ACCOUNT=$ACCOUNT"
         echo "Dry-run: Would execute interactive command:"
         echo "$SALLOC_CMD"
@@ -247,7 +275,7 @@ else
     SBATCH_ARGS=""
     [ -n "$ARRAY" ] && SBATCH_ARGS+=" --array=${ARRAY}"
     SBATCH_ARGS+=" --time=${TIME_MINUTES} --account=${ACCOUNT} --cpus-per-task=${NCPUS} --nodes=${NODES}"
-    [ -n "$MEM" ] && SBATCH_ARGS+=" --mem=${MEM}"
+    [ -n "$MEM_FLAG" ] && SBATCH_ARGS+=" ${MEM_FLAG}"
     [ -n "$JOB_NAME" ] && SBATCH_ARGS+=" --job-name=${JOB_NAME}"
     
     # Set output and error file locations if LOG_DIR is specified
@@ -270,6 +298,7 @@ else
         echo "  NODES=$NODES"
         echo "  ARRAY=$ARRAY"
         echo "  MEM=${MEM:-}"
+        echo "  MEM_FLAG=${MEM_FLAG:-<none>}"
         echo "  ACCOUNT=$ACCOUNT"
         echo "Dry-run: Would submit batch command:"
         echo "$SBATCH_CMD"

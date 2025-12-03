@@ -180,7 +180,8 @@ execute_qexec() {
     fi
     
     # Construct the qexec.sh command with conditional mem parameter
-    qexec_cmd="~/bin/qexec.sh --time ${time} --ncpus ${ncpus} --nodes ${nodes} --array=1-${nodes}"
+    # Each array task should request one node; the array size controls the number of nodes/batches.
+    qexec_cmd="~/bin/qexec.sh --time ${time} --ncpus ${ncpus} --nodes 1 --array=1-${nodes}"
     if [[ -n "$mem" ]]; then
         qexec_cmd+=" --mem ${mem}"
     fi
