@@ -1,0 +1,4 @@
+#!/bin/bash
+# Convenience launcher for the batch_exec Tcl/Tk GUI without needing to type 'wish'
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec wish "${SCRIPT_DIR}/batch_exec_gui.tcl"
