@@ -3,8 +3,10 @@
 """
 fmriprep_gui_tk.py
 
-A fully graphical Tcl/Tk (Tkinter) GUI to build fMRIPrep commands and generate
-a Slurm array script for a BIDS dataset. No third-party dependencies.
+Tk frontend for the fMRIPrep launcher workflow.
+
+Use this when you want a GUI and Textual is unavailable. The canonical backend
+entrypoint remains `fmriprep_launcher.py`.
 
 Features
 --------
@@ -24,108 +26,21 @@ Run
 python fmriprep_gui_tk.py
 """
 
-import csv
 import os
-import re
-import shutil
-import subprocess
 import sys
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-# ---------------- Utilities ----------------
-
-def which(cmd: str):
-    return shutil.which(cmd)
-
-def run_cmd(cmd):
-    try:
-        return subprocess.run(cmd, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except subprocess.CalledProcessError as e:
-        return e
-
-def read_meminfo_mb() -> int:
-    try:
-        with open("/proc/meminfo") as f:
-            for line in f:
-                if line.startswith("MemTotal:"):
-                    kb = int(line.split()[1])
-                    return kb // 1024
-    except Exception:
-        pass
-    return 16000
-
-def default_resources_from_env():
-    cpus = int(os.environ.get("SLURM_CPUS_PER_TASK", os.environ.get("SLURM_CPUS_ON_NODE", "0")) or 0)
-    mem_mb = 0
-    if "SLURM_MEM_PER_CPU" in os.environ and cpus > 0:
-        mem_mb = int(os.environ["SLURM_MEM_PER_CPU"]) * cpus
-    elif "SLURM_MEM_PER_NODE" in os.environ:
-        mem_mb = int(os.environ["SLURM_MEM_PER_NODE"])
-    if cpus <= 0:
-        cpus = os.cpu_count() or 4
-    if mem_mb == 0:
-        mem_mb = read_meminfo_mb()
-    mem_mb = int(mem_mb * 0.9)
-    return cpus, mem_mb
-
-def mb_to_human(mb: int) -> str:
-    if mb >= 1_000_000:
-        return f"{mb/1_000_000:.1f}T"
-    if mb >= 1000:
-        return f"{mb/1000:.1f}G"
-    return f"{mb}M"
-
-def discover_sif_images():
-    images = []
-    sif_dir = os.environ.get("FMRIPREP_SIF_DIR")
-    if sif_dir and os.path.isdir(os.path.expanduser(sif_dir)):
-        for p in Path(os.path.expanduser(sif_dir)).iterdir():
-            if p.suffix.lower() in (".sif", ".simg") and "fmriprep" in p.name.lower():
-                images.append(str(p))
-    return sorted(images)
-
-def docker_list_fmriprep_images():
-    if not which("docker"):
-        return []
-    proc = run_cmd(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"])
-    out = proc.stdout if hasattr(proc, "stdout") else ""
-    lines = [l.strip() for l in out.splitlines() if l.strip()]
-    return [l for l in lines if re.match(r"^(nipreps|poldracklab|fmriprep)/fmriprep(:|$)", l)]
-
-def detect_runtime_auto():
-    if which("singularity") or which("apptainer"):
-        return "singularity"
-    if which("fmriprep-docker"):
-        return "fmriprep-docker"
-    if which("docker"):
-        return "docker"
-    return "singularity"  # default preference
-
-# ---------------- BIDS helpers ----------------
-
-def parse_participants_tsv(bids_dir: Path):
-    f = bids_dir / "participants.tsv"
-    subs = []
-    if f.exists():
-        with open(f, "r", newline="") as tsvfile:
-            reader = csv.DictReader(tsvfile, delimiter="\t")
-            if not reader.fieldnames:
-                return subs
-            col = "participant_id" if "participant_id" in reader.fieldnames else reader.fieldnames[0]
-            for row in reader:
-                raw = str(row[col]).strip()
-                if raw:
-                    subs.append(raw if raw.startswith("sub-") else f"sub-{raw}")
-    return sorted(list(dict.fromkeys(subs)))
-
-def scan_sub_dirs(bids_dir: Path):
-    return sorted([p.name for p in bids_dir.iterdir() if p.is_dir() and p.name.startswith("sub-")])
-
-def discover_subjects(bids_dir: Path):
-    subs = parse_participants_tsv(bids_dir)
-    return subs if subs else scan_sub_dirs(bids_dir)
+from fmriprep_shared import (
+    default_resources_from_env,
+    detect_runtime_auto,
+    discover_sif_images,
+    discover_subjects,
+    docker_list_fmriprep_images,
+    mb_to_human,
+    which,
+)
 
 # ---------------- fMRIPrep command building ----------------
 
@@ -547,10 +462,11 @@ class App(tk.Tk):
             imgs = discover_sif_images()
             if not imgs:
                 messagebox.showinfo("Discover", "No fMRIPrep .sif/.simg found in $FMRIPREP_SIF_DIR."); return
+            img_values = [str(p) for p in imgs]
             # Choose via a simple selector
             top = tk.Toplevel(self); top.title("Select container")
             lb = tk.Listbox(top, width=80, height=8); lb.pack(fill="both", expand=True, padx=6, pady=6)
-            for i in imgs: lb.insert(tk.END, i)
+            for i in img_values: lb.insert(tk.END, i)
             def choose():
                 sel = lb.curselection()
                 if sel:

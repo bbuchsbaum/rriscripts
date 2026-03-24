@@ -1,7 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-# Wrapper script to run fmriprep_launcher wizard with virtual environment
+# Convenience wrapper for the canonical launcher wizard.
+# Prefer the launcher as the public entrypoint; this script only helps with env activation.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Activate virtual environment if available

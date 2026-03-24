@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
-fmriprep_tui_autocomplete.py - TUI with Tab Completion for fMRIPrep Launcher
+fmriprep_tui_autocomplete.py
 
-Enhanced version with tab completion for file/directory paths.
+Textual frontend for the fMRIPrep launcher workflow, with path tab completion.
+
+This is an optional frontend. The canonical backend entrypoint remains
+`fmriprep_launcher.py`.
 
 Requirements:
     pip install textual
@@ -27,14 +30,14 @@ import sys
 from typing import List, Set, Optional
 import glob
 
-# Import functions from fmriprep_launcher
+# Import shared backend helpers
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
-    from fmriprep_launcher import (
+    from fmriprep_shared import (
         discover_subjects, default_resources_from_env, load_config
     )
 except ImportError:
-    print("Could not import fmriprep_launcher.py")
+    print("Could not import fmriprep_shared.py")
     sys.exit(1)
 
 

@@ -1,29 +1,30 @@
 #!/usr/bin/env python3
 """
-fmriprep_command_builder_improved.py
+fmriprep_command_builder.py
 
-Interactive fMRIPrep command & Slurm script builder.
+Legacy interactive questionary frontend for building fMRIPrep commands and
+optional Slurm scripts.
 
-Key fixes vs. your original:
-- Correct flags: --nprocs (not --nthreads), --mem-mb (not --mem_mb), --skip-bids-validation (not underscores)
-- Adds --fs-license-file /opt/freesurfer/license.txt and --work-dir /work
-- Removes erroneous 'singularity -w /work' (which would try to make image writable)
-- Normalizes --participant-label to strip 'sub-' prefix
-- Fallback when participants.tsv is missing (scan sub-* dirs)
-- Creates output/work directories if needed
-- Runtime selection: Singularity/Apptainer, fmriprep-docker, or Docker
-- Version menu: discovers .sif/.simg in $FMRIPREP_SIF_DIR or Docker images locally
-- Capacity-aware defaults from SLURM or system
-- Optional Slurm ARRAY script generation
+This file is kept for compatibility, but the recommended entrypoint is now:
+
+    python fmriprep_launcher.py wizard
+
+The long-term direction is to keep shared behavior in fmriprep_launcher.py (or
+shared backend helpers) and treat this file as a thin frontend only.
 """
 
-import csv
 import os
-import re
 import sys
-import shutil
-import subprocess
 from pathlib import Path
+
+from fmriprep_shared import (
+    default_resources_from_env,
+    detect_runtime_optional,
+    discover_sif_images,
+    discover_subjects,
+    docker_list_fmriprep_images,
+    mb_to_human,
+)
 
 try:
     import questionary
@@ -31,18 +32,6 @@ try:
 except Exception as e:
     print("The 'questionary' library is required. Install it with: pip install questionary")
     sys.exit(1)
-
-
-# ---------------- Utilities ----------------
-
-def which(cmd: str):
-    return shutil.which(cmd)
-
-def run(cmd):
-    try:
-        return subprocess.run(cmd, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except subprocess.CalledProcessError as e:
-        return e
 
 class PathExistsValidator(Validator):
     def validate(self, document):
@@ -54,116 +43,6 @@ class PathExistsValidator(Validator):
 def ensure_dir(p: Path):
     p.mkdir(parents=True, exist_ok=True)
     return p
-
-def default_resources_from_env():
-    # CPUs
-    cpus = int(os.environ.get("SLURM_CPUS_PER_TASK", os.environ.get("SLURM_CPUS_ON_NODE", "0")) or 0)
-    if cpus <= 0:
-        cpus = os.cpu_count() or 4
-    # Memory (MB)
-    mem_mb = 0
-    if "SLURM_MEM_PER_CPU" in os.environ:
-        mem_mb = int(os.environ["SLURM_MEM_PER_CPU"]) * cpus
-    elif "SLURM_MEM_PER_NODE" in os.environ:
-        mem_mb = int(os.environ["SLURM_MEM_PER_NODE"])
-    else:
-        # /proc/meminfo
-        try:
-            with open("/proc/meminfo") as f:
-                for line in f:
-                    if line.startswith("MemTotal:"):
-                        kb = int(line.split()[1])
-                        mem_mb = kb // 1024
-                        break
-        except Exception:
-            mem_mb = 16000
-    # leave 10% headroom
-    mem_mb = int(mem_mb * 0.9)
-    return cpus, mem_mb
-
-def human_mb(mb: int):
-    if mb >= 1_000_000:
-        tb = mb / 1_000_000
-        # Check if effectively a whole number (within 0.05)
-        if abs(tb - round(tb)) < 0.05:
-            return f"{round(tb)}T"
-        else:
-            return f"{tb:.1f}T"
-    if mb >= 1000:
-        gb = mb / 1000
-        # Check if effectively a whole number (within 0.05)
-        if abs(gb - round(gb)) < 0.05:
-            return f"{round(gb)}G"
-        else:
-            return f"{gb:.1f}G"
-    return f"{mb}M"
-
-
-# ---------------- BIDS helpers ----------------
-
-def parse_participants_tsv(bids_dir: Path):
-    participants_file = bids_dir / "participants.tsv"
-    subs = []
-    if participants_file.exists():
-        with open(participants_file, "r", newline="") as tsvfile:
-            reader = csv.DictReader(tsvfile, delimiter="\t")
-            col = "participant_id" if "participant_id" in reader.fieldnames else None
-            if not col:
-                # take the first column
-                col = reader.fieldnames[0]
-            for row in reader:
-                raw = str(row[col]).strip()
-                if not raw:
-                    continue
-                subs.append(raw if raw.startswith("sub-") else f"sub-{raw}")
-    return sorted(list(dict.fromkeys(subs)))
-
-def scan_sub_dirs(bids_dir: Path):
-    subs = []
-    for p in bids_dir.iterdir():
-        if p.is_dir() and p.name.startswith("sub-"):
-            subs.append(p.name)
-    return sorted(subs)
-
-def get_participants(bids_dir: Path):
-    subs = parse_participants_tsv(bids_dir)
-    if not subs:
-        subs = scan_sub_dirs(bids_dir)
-    return subs
-
-
-# ---------------- Container/runtime helpers ----------------
-
-def detect_runtime():
-    if which("singularity") or which("apptainer"):
-        return "singularity"
-    if which("fmriprep-docker"):
-        return "fmriprep-docker"
-    if which("docker"):
-        return "docker"
-    return None
-
-def discover_sif_images(search_dir=None):
-    images = []
-    # Use provided directory or fall back to environment variable
-    if search_dir:
-        sif_dir = search_dir
-    else:
-        sif_dir = os.environ.get("FMRIPREP_SIF_DIR")
-    
-    if sif_dir and os.path.isdir(os.path.expanduser(sif_dir)):
-        for p in Path(os.path.expanduser(sif_dir)).iterdir():
-            if p.suffix.lower() in (".sif", ".simg") and "fmriprep" in p.name.lower():
-                images.append(str(p))
-    return sorted(images)
-
-def docker_list_fmriprep_images():
-    if not which("docker"):
-        return []
-    proc = run(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"])
-    out = proc.stdout if hasattr(proc, "stdout") else ""
-    lines = [l.strip() for l in out.splitlines() if l.strip()]
-    return [l for l in lines if re.match(r"^(nipreps|poldracklab|fmriprep)/fmriprep", l)]
 
 def strip_sub_prefix(label: str):
     return label[4:] if label.startswith("sub-") else label
@@ -265,7 +144,7 @@ def main():
         print("BIDS directory is required."); sys.exit(1)
 
     # Subjects
-    subs = get_participants(bids_dir)
+    subs = discover_subjects(bids_dir)
     if not subs:
         print("No subjects found in participants.tsv or sub-* directories."); sys.exit(1)
     selected = questionary.checkbox(
@@ -283,7 +162,7 @@ def main():
     ensure_dir(out_dir); ensure_dir(work_dir)
 
     # Runtime selection
-    detected = detect_runtime()
+    detected = detect_runtime_optional()
     runtime = questionary.select(
         "Pick a runtime:",
         choices=[
@@ -298,7 +177,7 @@ def main():
     if runtime == "singularity":
         images = discover_sif_images()
         if images:
-            container = questionary.select("Choose fMRIPrep .sif/.simg", choices=images).ask()
+            container = questionary.select("Choose fMRIPrep .sif/.simg", choices=[str(p) for p in images]).ask()
         else:
             # Ask for path - could be file or directory
             path_input = questionary.path(
@@ -311,7 +190,7 @@ def main():
             if path_obj.is_dir():
                 dir_images = discover_sif_images(str(path_obj))
                 if dir_images:
-                    container = questionary.select("Found fMRIPrep images. Choose one:", choices=dir_images).ask()
+                    container = questionary.select("Found fMRIPrep images. Choose one:", choices=[str(p) for p in dir_images]).ask()
                 else:
                     print(f"No .sif/.simg files found in {path_obj}")
                     container = questionary.path(
@@ -431,7 +310,7 @@ echo "Running fMRIPrep on {len(selected)} subject(s): {' '.join(selected)}"
         # Ask about memory specification
         use_mem = questionary.confirm("Specify memory limit? (select No for Trillium cluster)", default=True).ask()
         if use_mem:
-            mem_slurm = questionary.text("Slurm --mem (e.g., 32G):", default=human_mb(mem_mb)).ask()
+            mem_slurm = questionary.text("Slurm --mem (e.g., 32G):", default=mb_to_human(mem_mb)).ask()
             mem_line = f"#SBATCH --mem={mem_slurm}\n"
         else:
             mem_line = ""

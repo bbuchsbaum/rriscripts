@@ -1,39 +1,21 @@
 # fmriprep_launcher.py
 
-**What this is**: a one‑stop tool to build correct fMRIPrep commands and generate a Slurm array job for a BIDS dataset.
+This file is kept as a compatibility stub.
 
-## Quick start
+The canonical documentation now lives in [README.md](./README.md).
 
-### Discover what you have
+Use [fmriprep_launcher.py](./fmriprep_launcher.py) as the primary entrypoint:
+
 ```bash
 python fmriprep_launcher.py probe
+python fmriprep_launcher.py wizard --quick
+python fmriprep_launcher.py slurm-array --help
+python fmriprep_launcher.py print-cmd --help
 ```
 
-### Generate array script for *all* subjects
-```bash
-python fmriprep_launcher.py slurm-array   --bids /path/to/BIDS   --out  /path/to/BIDS/derivatives/fmriprep   --work /scratch/fmriprep_work   --subjects all   --runtime auto   --container auto   --fs-license /path/to/license.txt   --partition compute --time 24:00:00   --cpus-per-task 8 --mem 32G   --email you@uni.edu --mail-type END,FAIL
-```
-This writes `fmriprep_job/fmriprep_array.sbatch`, `fmriprep_job/subjects.txt`, and a `logs/` folder.  
-Submit it:
-```bash
-sbatch fmriprep_job/fmriprep_array.sbatch
-```
+Notes:
 
-### Print the exact fMRIPrep commands (no submission)
-```bash
-python fmriprep_launcher.py print-cmd   --bids /path/to/BIDS   --out  /path/to/BIDS/derivatives/fmriprep   --work /scratch/fmriprep_work   --subjects sub-01 sub-02   --runtime singularity   --container /containers/nipreps-fmriprep-23.2.0.sif   --fs-license /path/to/license.txt   --skip-bids-validation   --output-spaces "MNI152NLin2009cAsym:res-2 T1w"   --cifti-output   --use-syn-sdc   --extra "--stop-on-first-crash"
-```
-
-### Wizard (interactive)
-```bash
-python fmriprep_launcher.py wizard
-```
-
-## Notes & defaults
-
-- Runtimes: **Singularity/Apptainer**, **fmriprep-docker**, or **Docker** (auto-detected; override with `--runtime`).
-- Container version: auto‑picked from `$FMRIPREP_SIF_DIR` (for Singularity) or local Docker images; falls back to `nipreps/fmriprep:latest`.
-- Resources: `--nprocs` from SLURM or CPU count; `--omp-nthreads` defaults to `min(8, nprocs)`; `--mem-mb` ~= 90% of node memory.
-- License: mounted to `/opt/freesurfer/license.txt` and passed as `--fs-license-file` in all runtimes.
-- BIDS participants: reads `participants.tsv` (column `participant_id`) if present, else scans `sub-*` folders.
-- Output/work mounts: consistent `/data`, `/out`, `/work` across runtimes.
+- `fmriprep_launcher.py` is the supported backend and CLI.
+- `fmriprep_tui_autocomplete.py` and `fmriprep_gui_tk.py` are optional frontends.
+- `fmriprep_command_builder.py` is retained as a legacy interactive frontend.
+- INI is the supported config format; the `config_*.json` files are legacy examples.

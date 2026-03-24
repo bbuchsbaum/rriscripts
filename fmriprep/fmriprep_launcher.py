@@ -6,6 +6,10 @@ One-stop tool to build correct fMRIPrep commands and generate a Slurm array
 script for a BIDS dataset. Supports Singularity/Apptainer, the fmriprep-docker
 wrapper, and plain Docker. Includes an interactive "wizard" and CLI subcommands.
 
+This is the canonical backend and CLI entrypoint for the tools in this
+directory. Other UIs should be treated as optional frontends over the same
+workflow, not separate primary tools.
+
 For the best wizard experience with tab completion, install questionary:
   pip install --user questionary
 
@@ -24,214 +28,25 @@ Environment
 """
 
 import argparse
-import configparser
 import os
-import re
-import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict
+from typing import Dict, List, Optional
 
-
-# ---------------------------- Configuration ----------------------------
-
-def load_config(config_paths: List[str] = None) -> Dict[str, str]:
-    """
-    Load configuration from files. Checks in order:
-    1. System config: /etc/fmriprep/config.ini
-    2. User config: ~/.config/fmriprep/config.ini or ~/.fmriprep.ini
-    3. Local config: ./fmriprep.ini
-    4. Custom path if provided
-    
-    Later configs override earlier ones.
-    """
-    if config_paths is None:
-        config_paths = []
-    
-    # Default config locations
-    default_paths = [
-        "/etc/fmriprep/config.ini",
-        Path.home() / ".config" / "fmriprep" / "config.ini",
-        Path.home() / ".fmriprep.ini",
-        Path.cwd() / "fmriprep.ini"
-    ]
-    
-    config = configparser.ConfigParser()
-    defaults = {}
-    
-    for path in default_paths + [Path(p) for p in config_paths]:
-        if isinstance(path, str):
-            path = Path(path)
-        if path.exists():
-            config.read(path)
-            if 'defaults' in config:
-                defaults.update(dict(config['defaults']))
-            # Also check for a 'slurm' section for SLURM-specific defaults
-            if 'slurm' in config:
-                for key, value in config['slurm'].items():
-                    defaults[f'slurm_{key}'] = value
-    
-    return defaults
-
-# ---------------------------- Utilities ----------------------------
-
-def which(cmd: str) -> Optional[str]:
-    return shutil.which(cmd)
-
-def run_cmd(cmd: List[str], check=False) -> Tuple[int, str, str]:
-    """Run a command and capture (returncode, stdout, stderr)."""
-    try:
-        proc = subprocess.run(cmd, check=check, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        return proc.returncode, proc.stdout, proc.stderr
-    except Exception as e:
-        return 1, "", str(e)
-
-def parse_memory_to_mb(value: str) -> int:
-    """Parse memory string (e.g., '32G', '760000', '2T') to MB."""
-    if isinstance(value, int):
-        return value
-    
-    value = str(value).strip().upper()
-    
-    # Try to parse with units
-    import re
-    match = re.match(r'^(\d+(?:\.\d+)?)\s*([KMGT]?)B?$', value)
-    if match:
-        num = float(match.group(1))
-        unit = match.group(2)
-        
-        if unit == 'K':
-            return int(num / 1024)  # KB to MB
-        elif unit == 'M' or unit == '':
-            return int(num)  # Already MB or no unit means MB
-        elif unit == 'G':
-            return int(num * 1024)  # GB to MB  
-        elif unit == 'T':
-            return int(num * 1024 * 1024)  # TB to MB
-    
-    # Fallback: try to parse as plain number
-    try:
-        return int(float(value))
-    except:
-        raise ValueError(f"Cannot parse memory value: {value}")
-
-def mb_to_human(mb: int) -> str:
-    """Convert integer MB to Slurm-friendly string."""
-    if mb >= 1_000_000:
-        tb = mb / 1_000_000
-        # Check if effectively a whole number (within 0.05)
-        if abs(tb - round(tb)) < 0.05:
-            return f"{round(tb)}T"
-        else:
-            return f"{tb:.1f}T"
-    if mb >= 1000:
-        gb = mb / 1000
-        # Check if effectively a whole number (within 0.05)
-        if abs(gb - round(gb)) < 0.05:
-            return f"{round(gb)}G"
-        else:
-            return f"{gb:.1f}G"
-    return f"{mb}M"
-
-def read_meminfo_mb() -> int:
-    """Rough system memory from /proc/meminfo in MB."""
-    try:
-        with open("/proc/meminfo") as f:
-            for line in f:
-                if line.startswith("MemTotal:"):
-                    parts = line.split()
-                    kb = int(parts[1])  # kB
-                    return kb // 1024
-    except Exception:
-        pass
-    return 16000  # fallback 16 GB
-
-def default_resources_from_env() -> Tuple[int, int]:
-    """
-    Return (cpus, mem_mb) from Slurm env or system.
-    Leaves ~10% headroom for safety.
-    """
-    cpus = int(os.environ.get("SLURM_CPUS_PER_TASK", os.environ.get("SLURM_CPUS_ON_NODE", "0")) or 0)
-    mem_mb = 0
-    if "SLURM_MEM_PER_CPU" in os.environ and cpus > 0:
-        mem_mb = int(os.environ["SLURM_MEM_PER_CPU"]) * cpus
-    elif "SLURM_MEM_PER_NODE" in os.environ:
-        mem_mb = int(os.environ["SLURM_MEM_PER_NODE"])
-
-    if cpus <= 0:
-        cpus = os.cpu_count() or 4
-    if mem_mb == 0:
-        mem_mb = read_meminfo_mb()
-
-    mem_mb = int(mem_mb * 0.9)
-    return cpus, mem_mb
-
-def detect_runtime(prefer: str = "auto") -> str:
-    """
-    Determine container runtime: 'singularity', 'fmriprep-docker', or 'docker'.
-    Treat Apptainer as 'singularity'.
-    """
-    if prefer in ("singularity", "docker", "fmriprep-docker"):
-        return prefer
-    if which("singularity") or which("apptainer"):
-        return "singularity"
-    if which("fmriprep-docker"):
-        return "fmriprep-docker"
-    if which("docker"):
-        return "docker"
-    raise RuntimeError("No container runtime found. Install Singularity/Apptainer, fmriprep-docker, or Docker.")
-
-def discover_sif_images(search_dir: Optional[str]) -> List[Path]:
-    """Return fMRIPrep .sif/.simg images from a directory (non-recursive)."""
-    candidates: List[Path] = []
-    if search_dir:
-        d = Path(search_dir).expanduser()
-        if d.is_dir():
-            for p in d.iterdir():
-                if p.suffix.lower() in (".sif", ".simg") and "fmriprep" in p.name.lower():
-                    candidates.append(p)
-    return sorted(candidates)
-
-def docker_list_fmriprep_images() -> List[str]:
-    """Return local docker image:tag strings for fmriprep."""
-    if not which("docker"):
-        return []
-    rc, out, _ = run_cmd(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"])
-    if rc != 0:
-        return []
-    lines = [l.strip() for l in out.splitlines() if l.strip()]
-    return [l for l in lines if re.match(r"^(nipreps|poldracklab|fmriprep)/fmriprep(:|$)", l)]
-
-def parse_participants_tsv(bids: Path) -> List[str]:
-    tsv = bids / "participants.tsv"
-    subs: List[str] = []
-    if tsv.exists():
-        with open(tsv, "r", newline="") as f:
-            header = f.readline().strip().split("\t")
-            if not header:
-                return subs
-            # Use 'participant_id' if present, else first column
-            if "participant_id" in header:
-                idx = header.index("participant_id")
-            else:
-                idx = 0
-            for line in f:
-                cols = line.strip().split("\t")
-                if len(cols) > idx:
-                    sub = cols[idx].strip()
-                    if not sub:
-                        continue
-                    subs.append(sub if sub.startswith("sub-") else f"sub-{sub}")
-    return sorted(list(dict.fromkeys(subs)))
-
-def scan_bids_for_subjects(bids: Path) -> List[str]:
-    return sorted([p.name for p in bids.iterdir() if p.is_dir() and p.name.startswith("sub-")])
-
-def discover_subjects(bids: Path) -> List[str]:
-    subs = parse_participants_tsv(bids)
-    return subs if subs else scan_bids_for_subjects(bids)
+from fmriprep_shared import (
+    default_resources_from_env,
+    detect_runtime,
+    discover_sif_images,
+    discover_subjects,
+    docker_list_fmriprep_images,
+    load_config,
+    mb_to_human,
+    parse_memory_to_mb,
+    run_cmd,
+    which,
+)
 
 
 # ---------------------------- Command builder ----------------------------
