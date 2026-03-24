@@ -24,10 +24,12 @@ A suite of shell scripts for submitting and managing jobs on SLURM clusters. Des
 
 ### GUIs
 
+Both GUIs include input validation, tooltips on every field, a scrollable output pane for viewing results, and confirmation dialogs before real submissions. They require Tcl/Tk (`wish`).
+
 | Script | What it does |
 |---|---|
-| **qexec_gui.tcl** | Tcl/Tk GUI for `qexec.sh` — fill in fields and submit jobs visually. |
-| **batch_exec_gui.tcl** | Tcl/Tk GUI for `batch_exec.sh` — configure expansions and submit batch jobs. |
+| **qexec_gui.tcl** | GUI for `qexec.sh` — fill in fields, submit batch or interactive jobs, and see dry-run output in the built-in output pane. |
+| **batch_exec_gui.tcl** | GUI for `batch_exec.sh` — configure expansions, use the "Preview Expansion" button to see expanded commands before submitting, and build bracket expressions with the argument helper. |
 | **batch_exec_gui** | Convenience launcher for `batch_exec_gui.tcl`. |
 
 ### Haskell Implementations
