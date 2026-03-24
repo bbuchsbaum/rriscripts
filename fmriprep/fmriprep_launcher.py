@@ -279,6 +279,12 @@ def build_fmriprep_command(cfg: BuildConfig, subjects: List[str]) -> List[str]:
     if cfg.output_spaces:
         base_cli += ["--output-spaces"] + cfg.output_spaces.split()
     if cfg.use_aroma:
+        import warnings
+        warnings.warn(
+            "--use-aroma was removed in fMRIPrep >= 23.1.0. "
+            "This flag will cause an error with recent fMRIPrep versions.",
+            DeprecationWarning, stacklevel=2
+        )
         base_cli += ["--use-aroma"]
     if cfg.cifti_output:
         base_cli += ["--cifti-output", "91k"]
@@ -434,7 +440,8 @@ if [[ "$USE_SYN_SDC" == "1" ]]; then
   CLI_BASE+=(--use-syn-sdc)
 fi
 if [[ -n "$EXTRA_FLAGS" ]]; then
-  CLI_BASE+=($EXTRA_FLAGS)
+  read -ra _EXTRA <<< "$EXTRA_FLAGS"
+  CLI_BASE+=("${{_EXTRA[@]}}")
 fi
 
 echo "=== Running fMRIPrep on $HOSTNAME ==="
@@ -490,8 +497,8 @@ if [[ "$RUNTIME" == "singularity" ]]; then
       -B "$FS_LICENSE:/opt/freesurfer/license.txt:ro" \\
       -B "$TEMPLATEFLOW_HOST:/opt/templateflow" \\
       "$CONTAINER" \\
-      /data /out $CLI_BASE_STR --participant-label "${{SUBJECT_ID}}" --work-dir /work --fs-license-file /opt/freesurfer/license.txt
-    
+      /data /out ${{CLI_BASE_STR}} --participant-label "${{SUBJECT_ID}}" --work-dir /work --fs-license-file /opt/freesurfer/license.txt
+
     local EXIT_CODE=$?
     if [[ $EXIT_CODE -eq 0 ]]; then
       echo "✓ Successfully completed sub-${{SUBJECT_ID}}"
@@ -502,9 +509,9 @@ if [[ "$RUNTIME" == "singularity" ]]; then
   }}
   
   export -f run_subject
-  export RT_BIN BIDS_DIR OUT_DIR WORK_DIR FS_LICENSE TEMPLATEFLOW_HOST CONTAINER
-  # Export CLI_BASE array elements individually
-  CLI_BASE_STR="${{CLI_BASE[@]}}"
+  export RT_BIN BIDS_DIR OUT_DIR WORK_DIR FS_LICENSE TEMPLATEFLOW_HOST CONTAINER OMP_THREADS
+  # Export CLI_BASE as a properly quoted string for subshells
+  CLI_BASE_STR=$(printf '%q ' "${{CLI_BASE[@]}}")
   export CLI_BASE_STR
   
   # Run subjects in parallel
@@ -518,7 +525,7 @@ if [[ "$RUNTIME" == "singularity" ]]; then
   fi
 
 elif [[ "$RUNTIME" == "fmriprep-docker" ]]; then
-  fmriprep-docker "$BIDS_DIR" "$OUT_DIR" "${{CLI[@]}}" --work-dir "$WORK_DIR" --fs-license-file "$FS_LICENSE"
+  fmriprep-docker "$BIDS_DIR" "$OUT_DIR" "${{CLI_BASE[@]}}" --work-dir "$WORK_DIR" --fs-license-file "$FS_LICENSE"
 
 elif [[ "$RUNTIME" == "docker" ]]; then
   # Function to run fMRIPrep for a single subject with Docker
@@ -542,7 +549,7 @@ elif [[ "$RUNTIME" == "docker" ]]; then
       -v "$SUBJECT_WORK_DIR:/work" \\
       -v "$FS_LICENSE:/opt/freesurfer/license.txt:ro" \\
       "$CONTAINER" \\
-      /data /out $CLI_BASE_STR --participant-label "${{SUBJECT_ID}}" --fs-license-file /opt/freesurfer/license.txt --work-dir /work
+      /data /out ${{CLI_BASE_STR}} --participant-label "${{SUBJECT_ID}}" --fs-license-file /opt/freesurfer/license.txt --work-dir /work
     
     local EXIT_CODE=$?
     if [[ $EXIT_CODE -eq 0 ]]; then
@@ -554,9 +561,9 @@ elif [[ "$RUNTIME" == "docker" ]]; then
   }}
   
   export -f run_subject_docker
-  export BIDS_DIR OUT_DIR WORK_DIR FS_LICENSE CONTAINER
-  # Export CLI_BASE array elements 
-  CLI_BASE_STR="${{CLI_BASE[@]}}"
+  export BIDS_DIR OUT_DIR WORK_DIR FS_LICENSE CONTAINER OMP_THREADS
+  # Export CLI_BASE as a properly quoted string for subshells
+  CLI_BASE_STR=$(printf '%q ' "${{CLI_BASE[@]}}")
   export CLI_BASE_STR
   
   # Run subjects in parallel
@@ -591,9 +598,11 @@ def create_slurm_script(
 ) -> str:
     try:
         n = len([l for l in subject_file.read_text().splitlines() if l.strip() and not l.strip().startswith("#")])
-        array_max = max(0, n - 1)
     except Exception:
-        array_max = 0
+        n = 0
+    if n == 0:
+        raise ValueError(f"No subjects found in {subject_file}. Cannot generate SLURM array script with zero subjects.")
+    array_max = n - 1
 
     account_line = f"#SBATCH --account={account}\n" if account else ""
     mail_line = ""
@@ -713,9 +722,9 @@ def add_common_args(p: argparse.ArgumentParser, config: Dict[str, str] = None):
                    help=help_with_default("Pass --skip-bids-validation", "skip_bids_validation"))
     p.add_argument("--output-spaces", type=str, default=config.get("output_spaces"), 
                    help=help_with_default('Output spaces e.g. "MNI152NLin2009cAsym:res-2 T1w fsnative"', "output_spaces"))
-    p.add_argument("--use-aroma", action="store_true", 
+    p.add_argument("--use-aroma", action="store_true",
                    default=config.get("use_aroma", "").lower() == "true",
-                   help=help_with_default("Use ICA-AROMA", "use_aroma"))
+                   help=help_with_default("Use ICA-AROMA (DEPRECATED: removed in fMRIPrep >= 23.1.0)", "use_aroma"))
     p.add_argument("--cifti-output", action="store_true", 
                    default=config.get("cifti_output", "").lower() == "true",
                    help=help_with_default("Generate CIFTI outputs", "cifti_output"))

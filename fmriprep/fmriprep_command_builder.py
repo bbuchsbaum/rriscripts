@@ -215,7 +215,10 @@ if [[ -n "$OUTPUT_SPACES" ]]; then CLI+=(--output-spaces $OUTPUT_SPACES); fi
 if [[ "$AROMA" == "1" ]]; then CLI+=(--use-aroma); fi
 if [[ "$CIFTI" == "1" ]]; then CLI+=(--cifti-output 91k); fi
 if [[ "$RECONALL" == "0" ]]; then CLI+=(--fs-no-reconall); fi
-if [[ -n "$EXTRA" ]]; then CLI+=($EXTRA); fi
+if [[ -n "$EXTRA" ]]; then
+  read -ra _EXTRA <<< "$EXTRA"
+  CLI+=("${{_EXTRA[@]}}")
+fi
 
 echo "=== fMRIPrep $SUB ==="
 echo "Runtime: $RUNTIME"

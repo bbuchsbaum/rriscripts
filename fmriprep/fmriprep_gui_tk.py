@@ -208,8 +208,7 @@ SLURM_TEMPLATE = """\
 #SBATCH --partition={partition}
 #SBATCH --time={time}
 #SBATCH --cpus-per-task={cpus}
-#SBATCH --mem={mem}
-#SBATCH --nodes=1
+{mem_line}#SBATCH --nodes=1
 #SBATCH --array=0-{array_max}
 #SBATCH --output={log_dir}/%x_%A_%a.out
 #SBATCH --error={log_dir}/%x_%A_%a.err
@@ -250,24 +249,32 @@ if [[ "$AROMA" == "1" ]]; then CLI+=(--use-aroma); fi
 if [[ "$CIFTI" == "1" ]]; then CLI+=(--cifti-output 91k); fi
 if [[ "$RECONALL" == "0" ]]; then CLI+=(--fs-no-reconall); fi
 if [[ "$SYN_SDC" == "1" ]]; then CLI+=(--use-syn-sdc); fi
-if [[ -n "$EXTRA" ]]; then CLI+=($EXTRA); fi
+if [[ -n "$EXTRA" ]]; then
+  read -ra _EXTRA <<< "$EXTRA"
+  CLI+=("${{_EXTRA[@]}}")
+fi
 
 if [[ "$RUNTIME" == "singularity" ]]; then
   RT_BIN=$(command -v singularity || command -v apptainer)
-  TF_ENV=""
-  TF_BIND=""
-  if [[ "$BIND_TF" == "1" ]]; then
-    if [[ -d "$HOME/.cache/templateflow" ]]; then
-      TF_BIND="-B $HOME/.cache/templateflow:/templateflow"
-      TF_ENV="SINGULARITYENV_TEMPLATEFLOW_HOME=/templateflow"
-    fi
+  # Detect Apptainer vs Singularity for env var prefix
+  if [[ "$RT_BIN" == *"apptainer"* ]]; then
+    ENV_PREFIX="APPTAINERENV"
+  else
+    ENV_PREFIX="SINGULARITYENV"
   fi
-  env $TF_ENV "$RT_BIN" run --cleanenv \
-    -B "$BIDS_DIR:/data:ro" \
-    -B "$OUT_DIR:/out" \
-    -B "$WORK_DIR:/work" \
-    -B "$FS_LICENSE:/opt/freesurfer/license.txt:ro" \
-    $TF_BIND \
+
+  BIND_ARGS=()
+  BIND_ARGS+=(-B "$BIDS_DIR:/data:ro")
+  BIND_ARGS+=(-B "$OUT_DIR:/out")
+  BIND_ARGS+=(-B "$WORK_DIR:/work")
+  BIND_ARGS+=(-B "$FS_LICENSE:/opt/freesurfer/license.txt:ro")
+  if [[ "$BIND_TF" == "1" && -d "$HOME/.cache/templateflow" ]]; then
+    BIND_ARGS+=(-B "$HOME/.cache/templateflow:/templateflow")
+    export ${{ENV_PREFIX}}_TEMPLATEFLOW_HOME=/templateflow
+  fi
+
+  "$RT_BIN" run --cleanenv \
+    "${{BIND_ARGS[@]}}" \
     "$CONTAINER" \
     /data /out "${{CLI[@]}}" --work-dir /work --fs-license-file /opt/freesurfer/license.txt
 
@@ -689,13 +696,24 @@ class App(tk.Tk):
                 mail_line += f"#SBATCH --mail-type={sl['mail_type']}\n"
         module_line = "module load singularity\n" if sl["module_sing"] and cfg["runtime"] == "singularity" else ""
 
+        # Handle memory line - omit if blank or "none"
+        mem_val = sl["mem"]
+        if mem_val and mem_val.lower() != "none":
+            mem_line = f"#SBATCH --mem={mem_val}\n"
+        else:
+            mem_line = ""
+
+        if len(cfg["subjects"]) == 0:
+            messagebox.showerror("Error", "No subjects selected. Cannot generate SLURM script.")
+            return
+
         slurm_text = SLURM_TEMPLATE.format(
             job_name=sl["job_name"],
             partition=sl["partition"],
             time=sl["time"],
             cpus=self.cpus_per_task.get(),
-            mem=sl["mem"],
-            array_max=max(0, len(cfg["subjects"]) - 1),
+            mem_line=mem_line,
+            array_max=len(cfg["subjects"]) - 1,
             log_dir=str(log_dir),
             account=account_line,
             mail=mail_line,

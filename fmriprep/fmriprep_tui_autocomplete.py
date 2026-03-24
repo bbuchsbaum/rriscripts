@@ -31,8 +31,7 @@ import glob
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
     from fmriprep_launcher import (
-        discover_subjects, discover_sif_images,
-        detect_runtime, default_resources_from_env, load_config
+        discover_subjects, default_resources_from_env, load_config
     )
 except ImportError:
     print("Could not import fmriprep_launcher.py")

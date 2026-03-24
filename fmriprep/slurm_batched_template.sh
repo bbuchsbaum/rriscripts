@@ -78,7 +78,8 @@ if [[ "$USE_SYN_SDC" == "1" ]]; then
   CLI+=(--use-syn-sdc)
 fi
 if [[ -n "$EXTRA_FLAGS" ]]; then
-  CLI+=($EXTRA_FLAGS)
+  read -ra _EXTRA <<< "$EXTRA_FLAGS"
+  CLI+=("${_EXTRA[@]}")
 fi
 
 echo "=== Running fMRIPrep for batch $SLURM_ARRAY_TASK_ID on $HOSTNAME ==="
