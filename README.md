@@ -22,12 +22,13 @@ See the full **[qexec README](qexec/README.md)** for usage examples, the expansi
 
 Tools for building and submitting [fMRIPrep](https://fmriprep.org) preprocessing jobs:
 
-- **fmriprep_launcher.py** — one-stop CLI to probe your environment, build per-subject fMRIPrep commands, and generate SLURM array scripts for a BIDS dataset. Supports Singularity/Apptainer, fmriprep-docker, and Docker.
-- **fmriprep_gui_tk.py** / **fmriprep_tui.py** — graphical and terminal UI front-ends for the launcher
-- **run_fmriprep_wizard.sh** — interactive wizard for guided setup
-- **Config templates** — example `.ini` and `.json` files for common fMRIPrep configurations
+- **fmriprep_launcher.py** — one-stop CLI with `probe`, `print-cmd`, `slurm-array`, and `wizard` subcommands. Auto-detects runtimes and containers. Supports Singularity/Apptainer, fmriprep-docker, and Docker.
+- **Express wizard** (`wizard --quick`) — only asks 3-5 questions when a project config file is present; derives everything else from config/env
+- **fmriprep_gui_tk.py** / **fmriprep_tui_autocomplete.py** — graphical (Tk) and terminal (Textual) UI front-ends
+- **TemplateFlow support** — automatically binds and validates TemplateFlow caches for air-gapped compute nodes
+- **Config system** — cascading INI configs (system → user → project → CLI) so you set paths once and reuse
 
-See the **[fMRIPrep launcher README](fmriprep/README_fmriprep_launcher.md)** for quick-start examples.
+See the full **[fMRIPrep README](fmriprep/README.md)** for usage examples, configuration guide, TemplateFlow setup, and cluster-specific notes.
 
 ### [`xnat_cli/`](xnat_cli/) — XNAT Command-Line Client
 

@@ -1,205 +1,140 @@
 #!/bin/bash
+set -euo pipefail
 
 # bexec.sh
-# This script submits a batch job to SLURM using 'qexec.sh' to execute 'command_distributor.sh' as an array job.
-# It reads a command file and submits an array job that distributes and executes the commands across nodes.
+# Submit a pre-written commands file as a Slurm array job via qexec.sh and
+# command_distributor.sh. This is the file-oriented counterpart to batch_exec.sh.
 #
 # Usage:
-#   bexec.sh [options]
+#   bexec.sh -f commands.txt [options]
 #
 # Options:
-#   -f, --file       Path to the file containing the list of commands (required).
-#   -n, --nodes      Number of nodes/batches (default: 1).
-#       --time       Time for each job in hours (default: 1).
-#       --ncpus      Number of CPUs per job (default: 40).
-#       --mem        Memory per job (default: "6G").
-#   -j, --jobs       Maximum number of tasks executed concurrently on a node (default: 40).
-#
-# Arguments:
-#   None
-#
-# Examples:
-#
-#   1. **Basic Submission with Default Parameters**
-#      ```
-#      ./bexec.sh -f commands.txt
-#      ```
-#
-#   2. **Submitting to Multiple Nodes with Specific CPU Allocation**
-#      ```
-#      ./bexec.sh -f commands.txt -n 4 --ncpus 20
-#      ```
-#
-#   3. **Limiting Concurrent Jobs on Each Node**
-#      ```
-#      ./bexec.sh -f commands.txt -n 2 --ncpus 10 -j 20
-#      ```
-#
-#   ... (Other examples as per original bexec.R documentation)
+#   -f, --file FILE         Commands file to submit (required)
+#   -n, --nodes N           Number of array tasks / batches (default: 1)
+#       --time HOURS        Hours per array task (default: 1)
+#       --ncpus N           CPUs per array task (default: 40)
+#       --mem MEM           Memory per task (e.g. 12G). Omit to use qexec defaults.
+#       --no-mem            Pass through qexec's --no-mem switch
+#   -j, --jobs N            GNU parallel jobs per batch (default: 40)
+#   -N, --name NAME         Slurm job name
+#       --account NAME      Slurm account
+#   -l, --log-dir DIR       Slurm log directory
+#   -d, --dry-run           Show computed qexec call and exit
+#   -h, --help              Show this help
 
-# Exit immediately if a command exits with a non-zero status
-set -e
-
-#########################
-# Function Definitions  #
-#########################
-
-# Function to display usage information
 usage() {
-    echo "Usage: $0 [options]"
-    echo ""
-    echo "Options:"
-    echo "  -f, --file       Path to the file containing the list of commands (required)."
-    echo "  -n, --nodes      Number of nodes/batches (default: 1)."
-    echo "      --time       Time for each job in hours (default: 1)."
-    echo "      --ncpus      Number of CPUs per job (default: 40)."
-    echo "      --mem        Memory per job (default: \"6G\")."
-    echo "  -j, --jobs       Maximum number of tasks executed concurrently on a node (default: 40)."
-    echo "  -h, --help       Display help information."
-    echo ""
-    echo "Example:"
-    echo "  $0 -f commands.txt -n 4 --ncpus 20 -j 20 --mem \"12G\" --time 2"
+    sed -n '1,22p' "$0"
     exit 1
 }
 
-# Function to display detailed help
-detailed_help() {
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+find_script() {
+    local name="$1"
+    local candidate="$SCRIPT_DIR/$name"
+    if [[ -x "$candidate" ]]; then
+        printf '%s\n' "$candidate"
+        return
+    fi
+
+    candidate="$(command -v "$name" 2>/dev/null || true)"
+    if [[ -z "$candidate" ]]; then
+        echo "Error: required script '$name' not found next to bexec.sh or in PATH." >&2
+        exit 1
+    fi
+
+    printf '%s\n' "$candidate"
+}
+
+QEXEC_PATH="$(find_script qexec.sh)"
+CMD_DIST_PATH="$(find_script command_distributor.sh)"
+
+commands_file=""
+nodes=1
+time_hours=1
+ncpus=40
+mem=""
+no_mem=false
+jobs=40
+job_name=""
+account=""
+log_dir=""
+dry_run=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -f|--file)      commands_file="${2:-}"; shift 2 ;;
+        -n|--nodes)     nodes="${2:-}"; shift 2 ;;
+        --time)         time_hours="${2:-}"; shift 2 ;;
+        --ncpus)        ncpus="${2:-}"; shift 2 ;;
+        --mem)          mem="${2:-}"; shift 2 ;;
+        --no-mem)       no_mem=true; shift ;;
+        -j|--jobs)      jobs="${2:-}"; shift 2 ;;
+        -N|--name)      job_name="${2:-}"; shift 2 ;;
+        --account)      account="${2:-}"; shift 2 ;;
+        -l|--log-dir)   log_dir="${2:-}"; shift 2 ;;
+        -d|--dry-run)   dry_run=true; shift ;;
+        -h|--help)      usage ;;
+        *)              echo "Error: Unknown option: $1" >&2; usage ;;
+    esac
+done
+
+if [[ -z "$commands_file" ]]; then
+    echo "Error: --file is required." >&2
     usage
-    echo ""
-    echo "Examples:"
-    echo "  1. **Basic Submission with Default Parameters**"
-    echo "     \$ $0 -f commands.txt"
-    echo ""
-    echo "  2. **Submitting to Multiple Nodes with Specific CPU Allocation**"
-    echo "     \$ $0 -f commands.txt -n 4 --ncpus 20"
-    echo ""
-    echo "  3. **Limiting Concurrent Jobs on Each Node**"
-    echo "     \$ $0 -f commands.txt -n 2 --ncpus 10 -j 20"
-    echo ""
-    echo "  ... (Additional examples as per original bexec.R documentation)"
-    exit 0
-}
+fi
 
-# Function to parse command-line arguments
-parse_args() {
-    # Initialize default values
-    nodes=1
-    time=1
-    ncpus=40
-    mem=""
-    jobs=40
-    commands_file=""
-    
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            -f|--file)
-                if [[ -n "$2" && ! "$2" =~ ^- ]]; then
-                    commands_file="$2"
-                    shift 2
-                else
-                    echo "Error: --file requires a non-empty option argument."
-                    usage
-                fi
-                ;;
-            -n|--nodes)
-                if [[ -n "$2" && "$2" =~ ^[0-9]+$ ]]; then
-                    nodes="$2"
-                    shift 2
-                else
-                    echo "Error: --nodes requires a positive integer."
-                    usage
-                fi
-                ;;
-            --time)
-                if [[ -n "$2" && "$2" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-                    time="$2"
-                    shift 2
-                else
-                    echo "Error: --time requires a positive number."
-                    usage
-                fi
-                ;;
-            --ncpus)
-                if [[ -n "$2" && "$2" =~ ^[0-9]+$ ]]; then
-                    ncpus="$2"
-                    shift 2
-                else
-                    echo "Error: --ncpus requires a positive integer."
-                    usage
-                fi
-                ;;
-            --mem)
-                if [[ -n "$2" && "$2" =~ ^[0-9]+[KMG]$ ]]; then
-                    mem="$2"
-                    shift 2
-                else
-                    echo "Error: --mem requires a value like '6G', '12G', etc."
-                    usage
-                fi
-                ;;
-            -j|--jobs)
-                if [[ -n "$2" && "$2" =~ ^[0-9]+$ ]]; then
-                    jobs="$2"
-                    shift 2
-                else
-                    echo "Error: --jobs requires a positive integer."
-                    usage
-                fi
-                ;;
-            -h|--help)
-                detailed_help
-                ;;
-            *)
-                echo "Error: Unknown option: $1"
-                usage
-                ;;
-        esac
-    done
-    
-    # Check if commands_file is provided
-    if [[ -z "$commands_file" ]]; then
-        echo "Error: The --file option is required."
-        usage
-    fi
-    
-    # Validate commands_file existence
-    if [[ ! -f "$commands_file" ]]; then
-        echo "Error: Commands file '$commands_file' does not exist."
+if [[ ! -f "$commands_file" ]]; then
+    echo "Error: Commands file '$commands_file' does not exist." >&2
+    exit 1
+fi
+
+if ! [[ "$nodes" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Error: --nodes must be a positive integer." >&2
+    exit 1
+fi
+
+if ! [[ "$time_hours" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Error: --time must be a positive integer number of hours." >&2
+    exit 1
+fi
+
+if ! [[ "$ncpus" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Error: --ncpus must be a positive integer." >&2
+    exit 1
+fi
+
+if ! [[ "$jobs" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Error: --jobs must be a positive integer." >&2
+    exit 1
+fi
+
+if [[ -n "$mem" ]]; then
+    upper_mem="$(printf '%s' "$mem" | tr '[:lower:]' '[:upper:]')"
+    if ! [[ "$upper_mem" =~ ^[0-9]+[KMGTP]$ ]]; then
+        echo "Error: --mem must look like 6G, 512M, 1T, etc." >&2
         exit 1
     fi
-}
+fi
 
-# Function to construct and execute the qexec.sh command
-execute_qexec() {
-    # Determine the number of commands
-    total_commands=$(wc -l < "$commands_file" | xargs)
-    
-    if [[ $total_commands -eq 0 ]]; then
-        echo "Error: Commands file '$commands_file' is empty."
-        exit 1
-    fi
-    
-    # Construct the qexec.sh command with conditional mem parameter
-    # Each array task should request one node; the array size controls the number of nodes/batches.
-    qexec_cmd="~/bin/qexec.sh --time ${time} --ncpus ${ncpus} --nodes 1 --array=1-${nodes}"
-    if [[ -n "$mem" ]]; then
-        qexec_cmd+=" --mem ${mem}"
-    fi
-    qexec_cmd+=" ~/bin/command_distributor.sh ${commands_file} ${nodes} ${jobs}"
-    
-    echo "Submitting array job with the following command:"
-    echo "$qexec_cmd"
-    
-    # Execute the qexec.sh command
-    eval "$qexec_cmd"
-}
+total_commands="$(grep -cve '^[[:space:]]*$' "$commands_file" || true)"
+if [[ -z "$total_commands" || "$total_commands" -eq 0 ]]; then
+    echo "Error: Commands file '$commands_file' is empty after removing blank lines." >&2
+    exit 1
+fi
 
-#########################
-# Main Script Execution #
-#########################
+qexec_cmd=( "$QEXEC_PATH" "--time" "$time_hours" "--ncpus" "$ncpus" "--nodes" "1" "--array=1-${nodes}" )
+[[ -n "$mem" ]] && qexec_cmd+=( "--mem" "$mem" )
+[[ "$no_mem" == true ]] && qexec_cmd+=( "--no-mem" )
+[[ -n "$job_name" ]] && qexec_cmd+=( "--name" "$job_name" )
+[[ -n "$account" ]] && qexec_cmd+=( "--account" "$account" )
+[[ -n "$log_dir" ]] && qexec_cmd+=( "--log-dir" "$log_dir" )
+[[ "$dry_run" == true ]] && qexec_cmd+=( "--dry-run" )
+qexec_cmd+=( "--" "$CMD_DIST_PATH" "$commands_file" "$nodes" "$jobs" )
 
-# Parse the command-line arguments
-parse_args "$@"
+echo "Submitting $total_commands commands across $nodes batch(es)."
+echo "qexec command:"
+printf '  %q' "${qexec_cmd[@]}"
+printf '\n'
 
-# Execute the qexec.sh command to submit the job
-execute_qexec
+"${qexec_cmd[@]}"

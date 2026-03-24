@@ -78,6 +78,12 @@ setup() {
     [[ "$output" == *"OMP_NUM_THREADS=4"* ]]
 }
 
+@test "batch dry-run: preserves user command arguments" {
+    run "$QEXEC" --dry-run -- myscript.sh --array=foo
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"myscript.sh --array=foo"* ]]
+}
+
 # ── Interactive dry-run ────────────────────────────────────────────
 
 @test "interactive dry-run: basic" {
@@ -120,6 +126,18 @@ setup() {
     run "$QEXEC" --dry-run -t 0 -- myscript.sh
     [ "$status" -ne 0 ]
     [[ "$output" == *"positive integer"* ]]
+}
+
+@test "invalid ncpus value fails" {
+    run "$QEXEC" --dry-run -n 0 -- myscript.sh
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--ncpus"* ]]
+}
+
+@test "invalid omp thread value fails" {
+    run "$QEXEC" --dry-run -o 0 -- myscript.sh
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--omp_num_threads"* ]]
 }
 
 @test "invalid array range fails" {

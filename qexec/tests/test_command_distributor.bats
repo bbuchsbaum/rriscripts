@@ -65,6 +65,16 @@ teardown() {
     [[ "$output" == *"3 commands"* ]]
 }
 
+@test "blank lines are ignored" {
+    printf 'a\n\nb\n  \n' > "$TMPDIR/cmds.txt"
+    export SLURM_ARRAY_TASK_ID=1
+    run "$CMD_DIST" "$TMPDIR/cmds.txt" 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"2 commands"* ]]
+    [[ "$output" == *"MOCK_RUN: a"* ]]
+    [[ "$output" == *"MOCK_RUN: b"* ]]
+}
+
 @test "last batch may have fewer commands" {
     printf 'a\nb\nc\nd\ne\n' > "$TMPDIR/cmds.txt"
     export SLURM_ARRAY_TASK_ID=2
@@ -113,6 +123,15 @@ MOCK
     export SLURM_ARRAY_TASK_ID=1
     run "$CMD_DIST" "/no/such/file.txt" 1
     [ "$status" -ne 0 ]
+}
+
+@test "fails when GNU parallel is unavailable" {
+    export SLURM_ARRAY_TASK_ID=1
+    printf 'cmd1\n' > "$TMPDIR/cmds.txt"
+    mkdir -p "$TMPDIR/empty"
+    run env PATH="$TMPDIR/empty:/usr/bin:/bin" "$CMD_DIST" "$TMPDIR/cmds.txt" 1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"GNU parallel"* ]]
 }
 
 @test "fails with wrong number of arguments" {

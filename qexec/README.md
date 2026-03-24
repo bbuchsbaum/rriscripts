@@ -18,7 +18,7 @@ A suite of shell scripts for submitting and managing jobs on SLURM clusters. Des
 | Script | What it does |
 |---|---|
 | **bexec.sh** | Older batch executor. Takes a pre-written command file (`-f commands.txt`) and submits it as an array job via `qexec.sh` + `command_distributor.sh`. |
-| **send_slurm.sh** | Pipe-friendly interface: reads commands from stdin and submits them as a SLURM array job. Useful with `cmd_expand.sh \| send_slurm.sh`. |
+| **send_slurm.sh** | Pipe-friendly interface: reads commands from stdin, persists the generated command list/runner under `.qexec-state` (or `--state-dir`), and submits them as a SLURM array job. Useful with `cmd_expand.sh \| send_slurm.sh`. |
 | **rjobtop.py** | Live monitoring of a running SLURM job's CPU and memory utilization. Shows per-process breakdown, fork rate, and ASCII sparklines. Useful for R/future/callr workloads. |
 | **slurm_job_monitor.sh** | Polls SLURM jobs until completion, then reports efficiency via `seff`. Optional email or desktop notifications. |
 

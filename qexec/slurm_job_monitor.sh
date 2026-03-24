@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 # slurm_job_monitor.sh
 # This script monitors SLURM jobs, periodically displaying runtime,
@@ -18,12 +19,6 @@
 # If no job IDs are provided, the script monitors jobs submitted by the
 # current user within the last 30 minutes.
 
-set -e
-
-#########################
-# Function Definitions  #
-#########################
-
 usage() {
     echo "Usage: $0 [options] [jobid ...]"
     echo ""
@@ -35,6 +30,26 @@ usage() {
     echo ""
     echo "If no job IDs are provided, recent jobs from the last 30 minutes are monitored."
     exit 1
+}
+
+require_command() {
+    local name="$1"
+    if ! command -v "$name" >/dev/null 2>&1; then
+        echo "Error: required command '$name' was not found in PATH." >&2
+        exit 1
+    fi
+}
+
+thirty_minutes_ago() {
+    if date -d '-30 minutes' +%Y-%m-%dT%H:%M:%S >/dev/null 2>&1; then
+        date -d '-30 minutes' +%Y-%m-%dT%H:%M:%S
+        return
+    fi
+
+    python3 - <<'PY'
+from datetime import datetime, timedelta
+print((datetime.now() - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%S"))
+PY
 }
 
 #########################
@@ -61,13 +76,24 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if ! [[ "$interval" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Error: --interval must be a positive integer." >&2
+    exit 1
+fi
+
+require_command sacct
+require_command squeue
+
 #########################
 # Determine Job IDs     #
 #########################
 
 if [[ ${#job_ids[@]} -eq 0 ]]; then
-    start_time=$(date -d '-30 minutes' +%Y-%m-%dT%H:%M:%S)
-    mapfile -t job_ids < <(sacct -u "$USER" --starttime "$start_time" \
+    start_time="$(thirty_minutes_ago)"
+    while IFS= read -r job_id; do
+        [[ -z "$job_id" ]] && continue
+        job_ids+=("$job_id")
+    done < <(sacct -u "$USER" --starttime "$start_time" \
         --format=JobID --noheader | awk '{print $1}' | grep -E '^[0-9]+' | sort -u)
 fi
 
@@ -85,22 +111,26 @@ summaries=()
 
 while (( ${#completed[@]} < ${#job_ids[@]} )); do
     for job in "${job_ids[@]}"; do
-        if [[ -n ${completed[$job]} ]]; then
+        if [[ -n ${completed[$job]:-} ]]; then
             continue
         fi
-        state=$(squeue -j "$job" -h -o '%T')
+        state="$(squeue -j "$job" -h -o '%T' 2>/dev/null || true)"
         if [[ -z "$state" ]]; then
             echo "Job $job finished."
-            seff_output=$(seff "$job" 2>&1 || true)
+            if command -v seff >/dev/null 2>&1; then
+                seff_output="$(seff "$job" 2>&1 || true)"
+            else
+                seff_output="seff not available; install or load the Slurm efficiency tools to get a completion summary."
+            fi
             echo "$seff_output"
             summaries+=("Job $job summary:\n$seff_output\n")
             completed[$job]=1
         else
-            runtime=$(squeue -j "$job" -h -o '%M')
+            runtime="$(squeue -j "$job" -h -o '%M' 2>/dev/null || true)"
             cpu=""
             mem=""
             if [[ "$state" == "RUNNING" ]]; then
-                stats=$(sstat -j "${job}.batch" -P -o AveCPU,AveRSS 2>/dev/null | tail -n1)
+                stats="$(sstat -j "${job}.batch" -P -o AveCPU,AveRSS 2>/dev/null | tail -n1 || true)"
                 cpu=$(echo "$stats" | cut -d'|' -f1)
                 mem=$(echo "$stats" | cut -d'|' -f2)
             fi
@@ -134,4 +164,3 @@ if [[ "$notify" == true ]]; then
 fi
 
 exit 0
-
