@@ -52,6 +52,35 @@ print((datetime.now() - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%S"))
 PY
 }
 
+is_completed() {
+    local job_id="$1"
+    case " ${completed_jobs:-} " in
+        *" ${job_id} "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Check whether a job has truly finished by querying sacct for a terminal state.
+# Returns 0 (true) if the job is in a terminal state, 1 otherwise.
+# Sets JOB_FINAL_STATE to the state string.
+check_job_finished() {
+    local job_id="$1"
+    JOB_FINAL_STATE=""
+
+    # sacct is authoritative — squeue can be transiently empty
+    local state
+    state="$(sacct -j "$job_id" --noheader --parsable2 \
+        --format=State | head -n1 | cut -d'|' -f1 || true)"
+
+    case "$state" in
+        COMPLETED|FAILED|CANCELLED|CANCELLED+|TIMEOUT|PREEMPTED|NODE_FAIL|OUT_OF_MEMORY|DEADLINE)
+            JOB_FINAL_STATE="$state"
+            return 0 ;;
+        *)
+            return 1 ;;
+    esac
+}
+
 #########################
 # Argument Parsing      #
 #########################
@@ -64,8 +93,10 @@ job_ids=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -i|--interval)
+            if [[ $# -lt 2 ]]; then echo "Error: $1 requires a value." >&2; usage; fi
             interval="$2"; shift 2 ;;
         -e|--email)
+            if [[ $# -lt 2 ]]; then echo "Error: $1 requires a value." >&2; usage; fi
             email="$2"; shift 2 ;;
         -n|--notify)
             notify=true; shift ;;
@@ -90,11 +121,12 @@ require_command squeue
 
 if [[ ${#job_ids[@]} -eq 0 ]]; then
     start_time="$(thirty_minutes_ago)"
+    # Only pick up parent job IDs (pure digits), not array sub-tasks (digits_digits)
     while IFS= read -r job_id; do
         [[ -z "$job_id" ]] && continue
         job_ids+=("$job_id")
     done < <(sacct -u "$USER" --starttime "$start_time" \
-        --format=JobID --noheader | awk '{print $1}' | grep -E '^[0-9]+' | sort -u)
+        --format=JobID --noheader | awk '{print $1}' | grep -E '^[0-9]+$' | sort -u)
 fi
 
 if [[ ${#job_ids[@]} -eq 0 ]]; then
@@ -102,54 +134,97 @@ if [[ ${#job_ids[@]} -eq 0 ]]; then
     exit 1
 fi
 
+echo "Monitoring ${#job_ids[@]} job(s): ${job_ids[*]}"
+echo "Poll interval: ${interval}s"
+echo "---"
+
 #########################
 # Monitoring Loop       #
 #########################
 
-declare -A completed
+completed_jobs=""
+completed_count=0
 summaries=()
 
-while (( ${#completed[@]} < ${#job_ids[@]} )); do
+# Print partial results on Ctrl-C
+trap 'echo ""; echo "Interrupted. Partial results:"; \
+      if [[ ${#summaries[@]} -gt 0 ]]; then printf "%b\n" "${summaries[@]}"; \
+      else echo "  (no jobs completed yet)"; fi; exit 130' INT TERM
+
+while (( completed_count < ${#job_ids[@]} )); do
     for job in "${job_ids[@]}"; do
-        if [[ -n ${completed[$job]:-} ]]; then
+        if is_completed "$job"; then
             continue
         fi
+
+        # First check squeue for running/pending status
         state="$(squeue -j "$job" -h -o '%T' 2>/dev/null || true)"
+
         if [[ -z "$state" ]]; then
-            echo "Job $job finished."
-            if command -v seff >/dev/null 2>&1; then
-                seff_output="$(seff "$job" 2>&1 || true)"
+            # squeue is empty — verify with sacct that the job truly finished
+            # (avoids race condition during job startup or scheduler hiccups)
+            if check_job_finished "$job"; then
+                echo "Job $job finished ($JOB_FINAL_STATE)."
+                if command -v seff >/dev/null 2>&1; then
+                    seff_output="$(seff "$job" 2>&1 || true)"
+                else
+                    seff_output="seff not available; install or load the Slurm efficiency tools to get a completion summary."
+                fi
+                echo "$seff_output"
+                summaries+=("$(printf 'Job %s (%s):\n%s\n' "$job" "$JOB_FINAL_STATE" "$seff_output")")
+                completed_jobs="${completed_jobs} ${job}"
+                completed_count=$((completed_count + 1))
             else
-                seff_output="seff not available; install or load the Slurm efficiency tools to get a completion summary."
+                # Not in squeue but sacct doesn't show terminal state — transient, retry next poll
+                echo "Job $job: state unclear (not in squeue, sacct shows non-terminal) — will retry"
             fi
-            echo "$seff_output"
-            summaries+=("Job $job summary:\n$seff_output\n")
-            completed[$job]=1
         else
             runtime="$(squeue -j "$job" -h -o '%M' 2>/dev/null || true)"
             cpu=""
             mem=""
             if [[ "$state" == "RUNNING" ]]; then
-                stats="$(sstat -j "${job}.batch" -P -o AveCPU,AveRSS 2>/dev/null | tail -n1 || true)"
-                cpu=$(echo "$stats" | cut -d'|' -f1)
-                mem=$(echo "$stats" | cut -d'|' -f2)
+                # For array jobs, sstat needs the sub-task ID; for regular jobs, use .batch
+                local_stats=""
+                if [[ "$job" =~ _[0-9]+$ ]]; then
+                    # Array sub-task: use as-is with .batch
+                    local_stats="$(sstat -j "${job}.batch" -P -o AveCPU,AveRSS 2>/dev/null | tail -n1 || true)"
+                else
+                    # Try parent.batch first, then without suffix
+                    local_stats="$(sstat -j "${job}.batch" -P -o AveCPU,AveRSS 2>/dev/null | tail -n1 || true)"
+                fi
+                if [[ -n "$local_stats" ]]; then
+                    cpu=$(echo "$local_stats" | cut -d'|' -f1)
+                    mem=$(echo "$local_stats" | cut -d'|' -f2)
+                fi
             fi
-            echo "Job $job: $state TIME=$runtime CPU=$cpu MEM=$mem"
+            echo "Job $job: $state  TIME=$runtime  CPU=${cpu:--}  MEM=${mem:--}"
         fi
     done
-    sleep "$interval"
-    echo "---"
+
+    # Only sleep if there are still jobs to monitor
+    if (( completed_count < ${#job_ids[@]} )); then
+        sleep "$interval"
+        echo "---"
+    fi
 done
 
 #########################
 # Final Notification    #
 #########################
 
-summary=$(printf '%b\n' "${summaries[@]}")
+echo ""
+echo "=== All ${#job_ids[@]} job(s) complete ==="
+
+if [[ ${#summaries[@]} -gt 0 ]]; then
+    summary=$(printf '%s\n' "${summaries[@]}")
+else
+    summary="All jobs completed (no summaries available)."
+fi
 
 if [[ -n "$email" ]]; then
     if command -v mail >/dev/null 2>&1; then
-        echo -e "$summary" | mail -s "SLURM job summary" "$email"
+        echo "$summary" | mail -s "SLURM job summary" "$email"
+        echo "Summary emailed to $email."
     else
         echo "mail command not found; unable to send email." >&2
     fi
