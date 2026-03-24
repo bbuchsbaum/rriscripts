@@ -209,6 +209,21 @@ if ! [[ "$TIME" =~ ^[1-9][0-9]*$ ]]; then
     exit 1
 fi
 
+if ! [[ "$NCPUS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Error: --ncpus must be a positive integer." >&2
+    exit 1
+fi
+
+if ! [[ "$NODES" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Error: --nodes must be a positive integer." >&2
+    exit 1
+fi
+
+if ! [[ "$OMP_NUM_THREADS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Error: --omp_num_threads must be a positive integer." >&2
+    exit 1
+fi
+
 # Validate required arguments
 if [ -z "$COMMAND" ] && [ "$INTERACTIVE" == "false" ]; then
     echo "Error: A command is required unless interactive mode is used." >&2
@@ -258,8 +273,8 @@ else
     # Batch job: build sbatch command as an array
     TIME_MINUTES=$((TIME * 60))
 
-    # Expand home directory and clean up command
-    CLEAN_CMD=$(printf '%s' "$COMMAND" | sed "s|~/bin|$HOME/bin|g" | sed 's/--array=[0-9-]*//')
+    # Expand a common ~/bin shorthand without mutating other command arguments.
+    CLEAN_CMD=$(printf '%s' "$COMMAND" | sed "s|~/bin|$HOME/bin|g")
 
     if [ "$DRY_RUN" = true ]; then
         # Build the sbatch args for display
@@ -298,6 +313,7 @@ else
 
     cat > "$JOB_SCRIPT" <<JOBEOF
 #!/bin/bash
+set -euo pipefail
 export OMP_NUM_THREADS=${OMP_NUM_THREADS}
 export MKL_NUM_THREADS=${OMP_NUM_THREADS}
 ${CLEAN_CMD}
@@ -312,7 +328,7 @@ JOBEOF
 
     # Set output and error file locations if LOG_DIR is specified
     if [ -n "$LOG_DIR" ]; then
-        mkdir -p "$LOG_DIR" 2>/dev/null || true
+        mkdir -p "$LOG_DIR"
         SBATCH_CMD+=(--output="${LOG_DIR}/slurm-%j.out" --error="${LOG_DIR}/slurm-%j.err")
     fi
 

@@ -544,10 +544,12 @@ elif [[ "$RUNTIME" == "docker" ]]; then
       -e MPLCONFIGDIR=/work/.matplotlib \\
       -e HOME=/work/.home \\
       -e NUMEXPR_MAX_THREADS=$OMP_THREADS \\
+      -e TEMPLATEFLOW_HOME=/opt/templateflow \\
       -v "$BIDS_DIR:/data:ro" \\
       -v "$OUT_DIR:/out" \\
       -v "$SUBJECT_WORK_DIR:/work" \\
       -v "$FS_LICENSE:/opt/freesurfer/license.txt:ro" \\
+      -v "$TEMPLATEFLOW_HOST:/opt/templateflow" \\
       "$CONTAINER" \\
       /data /out ${{CLI_BASE_STR}} --participant-label "${{SUBJECT_ID}}" --fs-license-file /opt/freesurfer/license.txt --work-dir /work
     
@@ -561,7 +563,7 @@ elif [[ "$RUNTIME" == "docker" ]]; then
   }}
   
   export -f run_subject_docker
-  export BIDS_DIR OUT_DIR WORK_DIR FS_LICENSE CONTAINER OMP_THREADS
+  export BIDS_DIR OUT_DIR WORK_DIR FS_LICENSE CONTAINER OMP_THREADS TEMPLATEFLOW_HOST
   # Export CLI_BASE as a properly quoted string for subshells
   CLI_BASE_STR=$(printf '%q ' "${{CLI_BASE[@]}}")
   export CLI_BASE_STR
@@ -932,10 +934,222 @@ def cmd_slurm_array(args):
     print("\nSubmit with:")
     print(f"  sbatch {script_path}")
 
+def _validate_templateflow(tf_path: Path):
+    """Warn if TemplateFlow directory looks empty or missing key templates."""
+    if not tf_path.exists():
+        print(f"\n⚠ TemplateFlow directory does not exist yet: {tf_path}")
+        print("  It will be created, but compute nodes without internet cannot download templates.")
+        print("  Pre-populate on a login node with:")
+        print(f"    python -c \"import templateflow.api as tfa; tfa.get('MNI152NLin2009cAsym')\"")
+        print(f"  Or copy an existing TemplateFlow cache to: {tf_path}\n")
+        return
+    # Check for at least one template directory
+    subdirs = [p for p in tf_path.iterdir() if p.is_dir() and p.name.startswith("tpl-")]
+    if not subdirs:
+        print(f"\n⚠ TemplateFlow directory exists but contains no templates: {tf_path}")
+        print("  fMRIPrep will fail on air-gapped compute nodes without cached templates.")
+        print("  Pre-populate on a login node with:")
+        print(f"    python -c \"import templateflow.api as tfa; tfa.get('MNI152NLin2009cAsym')\"")
+        print(f"  Or copy an existing TemplateFlow cache to: {tf_path}\n")
+    else:
+        print(f"✓ TemplateFlow: {len(subdirs)} template(s) found in {tf_path}")
+
+
+def cmd_wizard_quick(args, config):
+    """Express wizard: only ask essentials, derive everything else from config/env."""
+
+    # Minimal imports for interactive prompts
+    try:
+        import questionary
+    except ImportError:
+        questionary = None
+
+    def ask(prompt, default=None, choices=None, path=False):
+        if questionary:
+            if choices:
+                return questionary.select(prompt, choices=choices).ask()
+            if path:
+                return questionary.path(prompt, default=default).ask()
+            return questionary.text(prompt, default=default).ask()
+        else:
+            if choices:
+                for i, c in enumerate(choices, 1):
+                    print(f"  {i}. {c}")
+                val = input(f"Enter choice (1-{len(choices)}) [{default or ''}]: ").strip()
+                if val.isdigit() and 1 <= int(val) <= len(choices):
+                    return choices[int(val) - 1]
+                return default or choices[0]
+            val = input(f"{prompt} [{default or ''}]: ").strip()
+            return val or default
+
+    print("=" * 60)
+    print("fMRIPrep Express Setup")
+    print("Uses config file defaults for most settings.")
+    print("Run 'wizard' (without --quick) for full control.")
+    print("=" * 60 + "\n")
+
+    # 1. BIDS path
+    default_bids = config.get('bids', str(Path.cwd()))
+    bids = Path(ask("BIDS dataset path", default=default_bids, path=True)).expanduser()
+    while not bids.exists():
+        print("Path does not exist.")
+        bids = Path(ask("BIDS dataset path", default=str(Path.cwd()), path=True)).expanduser()
+
+    # 2. Subjects
+    subs = discover_subjects(bids)
+    if not subs:
+        print("No subjects found in BIDS directory. Exiting.")
+        return
+    print(f"Found {len(subs)} subjects.")
+    selection = ask("Which subjects?", choices=["all"] + (["select"] if len(subs) > 1 else []))
+    if selection == "select":
+        for i, s in enumerate(subs, 1):
+            print(f"  {i}. {s}")
+        sel_input = input("Enter numbers separated by spaces (e.g., '1 3 5'), or range '1-10': ").strip()
+        if '-' in sel_input and not sel_input.startswith('sub-'):
+            try:
+                start, end = sel_input.split('-')
+                selected_subjects = subs[int(start)-1:int(end)]
+            except:
+                print("Invalid range, using all.")
+                selected_subjects = subs
+        else:
+            selected_subjects = []
+            for n in sel_input.split():
+                try:
+                    selected_subjects.append(subs[int(n)-1])
+                except (ValueError, IndexError):
+                    pass
+            if not selected_subjects:
+                selected_subjects = subs
+    else:
+        selected_subjects = subs
+
+    print(f"Selected {len(selected_subjects)} subjects.")
+
+    # 3. Resolve runtime + container (from config, ask only if missing)
+    runtime = config.get('runtime', 'auto')
+    if runtime == 'auto':
+        try:
+            runtime = detect_runtime("auto")
+            print(f"Auto-detected runtime: {runtime}")
+        except:
+            runtime = ask("Runtime?", choices=["singularity", "fmriprep-docker", "docker"])
+
+    container = config.get('container', 'auto')
+    if container == 'auto' or not container:
+        if runtime == "singularity":
+            sif_dir = os.environ.get("FMRIPREP_SIF_DIR")
+            images = discover_sif_images(sif_dir)
+            if images:
+                container = str(images[0]) if len(images) == 1 else ask("Choose container", choices=[str(p) for p in images])
+            else:
+                container = ask("Path to fMRIPrep .sif/.simg", path=True)
+        else:
+            imgs = docker_list_fmriprep_images()
+            container = imgs[0] if imgs else ask("Docker image:tag", default="nipreps/fmriprep:latest")
+    else:
+        container_path = Path(container).expanduser()
+        if container_path.is_dir():
+            dir_images = discover_sif_images(str(container_path))
+            if dir_images:
+                container = str(dir_images[0]) if len(dir_images) == 1 else ask("Choose container", choices=[str(p) for p in dir_images])
+        print(f"Using container: {container}")
+
+    # 4. FS license (from config/env, ask only if missing)
+    fs_license_str = config.get('fs_license', os.environ.get("FS_LICENSE", ""))
+    if not fs_license_str or not Path(fs_license_str).expanduser().exists():
+        fs_license_str = ask("Path to FreeSurfer license.txt", default=fs_license_str or str(Path.home() / "license.txt"), path=True)
+    fs_license = Path(fs_license_str).expanduser()
+    print(f"Using FS license: {fs_license}")
+
+    # 5. TemplateFlow (from config/env, validate)
+    tf_str = config.get('templateflow_home',
+                        os.environ.get("TEMPLATEFLOW_HOME",
+                                      str(Path.home() / ".cache" / "templateflow")))
+    templateflow_home = Path(tf_str).expanduser()
+    templateflow_home.mkdir(parents=True, exist_ok=True)
+    _validate_templateflow(templateflow_home)
+
+    # 6. Derive all other settings from config
+    cpus_auto, mem_auto = default_resources_from_env()
+    nprocs = int(config.get('nprocs', str(cpus_auto)))
+    omp_threads = int(config.get('omp_threads', str(min(8, nprocs))))
+    mem_mb = int(config.get('mem_mb', str(mem_auto)))
+    output_spaces = config.get('output_spaces', "MNI152NLin2009cAsym:res-2 T1w")
+    skip_bids_validation = config.get('skip_bids_validation', 'true').lower() == 'true'
+    use_aroma = config.get('use_aroma', 'false').lower() == 'true'
+    cifti_output = config.get('cifti_output', 'false').lower() == 'true'
+    fs_reconall = config.get('fs_reconall', 'true').lower() == 'true'
+    use_syn_sdc = config.get('use_syn_sdc', 'false').lower() == 'true'
+    extra = config.get('extra', '')
+
+    cfg = BuildConfig(
+        bids=bids, out=Path(config.get('out', str(bids / "derivatives" / "fmriprep"))),
+        work=Path(config.get('work', str(bids / "work_fmriprep"))),
+        subjects=selected_subjects,
+        container_runtime=runtime, container=container,
+        fs_license=fs_license, templateflow_home=templateflow_home,
+        omp_threads=omp_threads, nprocs=nprocs, mem_mb=mem_mb,
+        extra=extra, skip_bids_validation=skip_bids_validation,
+        output_spaces=output_spaces or None,
+        use_aroma=use_aroma, cifti_output=cifti_output,
+        fs_reconall=fs_reconall, use_syn_sdc=use_syn_sdc
+    )
+
+    # Create output dirs
+    cfg.out.mkdir(parents=True, exist_ok=True)
+    cfg.work.mkdir(parents=True, exist_ok=True)
+
+    # Preview
+    preview_cmd = build_fmriprep_command(cfg, selected_subjects[0])
+    print(f"\nExample command:\n$ {' '.join(preview_cmd)}")
+
+    # Generate SLURM script
+    gen = ask("Generate SLURM array script?", choices=["y", "n"])
+    if gen == "y":
+        outdir = Path(config.get('slurm_script_outdir', str(Path.cwd() / "fmriprep_job"))).expanduser()
+        outdir.mkdir(parents=True, exist_ok=True)
+
+        subj_file = outdir / "subjects.txt"
+        subj_file.write_text("\n".join(selected_subjects) + "\n")
+
+        partition = config.get('slurm_partition', os.environ.get("SLURM_JOB_PARTITION", "compute"))
+        time = config.get('slurm_time', "24:00:00")
+        cpus_per_task = int(config.get('slurm_cpus_per_task', str(nprocs)))
+        account = config.get('slurm_account') or None
+        email = config.get('slurm_email') or None
+        mail_type = config.get('slurm_mail_type') or None
+        job_name = config.get('slurm_job_name', "fmriprep")
+        log_dir = Path(config.get('slurm_log_dir', str(outdir / "logs"))).expanduser()
+        no_mem = config.get('no_mem', 'false').lower() == 'true'
+        mem = None if no_mem else config.get('slurm_mem', mb_to_human(mem_mb))
+        module_sing = runtime == "singularity"
+
+        script_text = create_slurm_script(
+            cfg=cfg, subject_file=subj_file, partition=partition, time=time,
+            cpus_per_task=cpus_per_task, mem=mem, account=account, email=email,
+            mail_type=mail_type, log_dir=log_dir, module_singularity=module_sing,
+            job_name=job_name
+        )
+        script_path = outdir / "fmriprep_array.sbatch"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        script_path.write_text(script_text)
+        os.chmod(script_path, 0o755)
+        print(f"\nWrote SLURM script: {script_path}")
+        print(f"Wrote subject list: {subj_file}")
+        print(f"\nSubmit with:\n  sbatch {script_path}")
+    print("\nDone!")
+
+
 def cmd_wizard(args):
     # Load config for defaults
     config = load_config([args.config] if hasattr(args, 'config') and args.config else [])
-    
+
+    # Quick mode: express wizard with minimal questions
+    if getattr(args, 'quick', False):
+        return cmd_wizard_quick(args, config)
+
     # Optional interactive flow; Questionary if available, else text input.
     try:
         import questionary
@@ -1167,6 +1381,7 @@ def cmd_wizard(args):
                                                    str(Path.home() / ".cache" / "templateflow")))
     templateflow_home = Path(ask("TemplateFlow directory (will be created if needed)", default=default_templateflow, path=True)).expanduser()
     templateflow_home.mkdir(parents=True, exist_ok=True)
+    _validate_templateflow(templateflow_home)
 
     # Resources
     cpus_auto, mem_auto = default_resources_from_env()
@@ -1392,6 +1607,8 @@ Environment Variables:
 
     # wizard
     p_wiz = sub.add_parser("wizard", help="Interactive setup (questionary if available, else basic prompts)")
+    p_wiz.add_argument("--quick", action="store_true",
+                       help="Express mode: only ask essential questions, derive everything else from config/env/defaults")
     p_wiz.set_defaults(func=cmd_wizard)
 
     args = ap.parse_args()

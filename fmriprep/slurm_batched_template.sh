@@ -32,6 +32,7 @@ USE_AROMA="{use_aroma}"
 CIFTI="{cifti}"
 FS_RECONALL="{fs_reconall}"
 USE_SYN_SDC="{use_syn_sdc}"
+TEMPLATEFLOW_HOME="${{TEMPLATEFLOW_HOME:-{templateflow_home}}}"
 
 # ===== Derived settings =====
 # Read subject batches (each line may contain multiple space-separated subjects)
@@ -88,13 +89,25 @@ echo "Container: $CONTAINER"
 echo "Subjects: ${SUBJECTS[@]}"
 echo "----------------------------------------------"
 
+mkdir -p "$TEMPLATEFLOW_HOME"
+
 if [[ "$RUNTIME" == "singularity" ]]; then
   RT_BIN=$(command -v singularity || command -v apptainer)
+
+  # Detect Apptainer vs Singularity for env var prefix
+  if [[ "$RT_BIN" == *"apptainer"* ]]; then
+    ENV_PREFIX="APPTAINERENV"
+  else
+    ENV_PREFIX="SINGULARITYENV"
+  fi
+  export ${ENV_PREFIX}_TEMPLATEFLOW_HOME=/opt/templateflow
+
   "$RT_BIN" run --cleanenv \
     -B "$BIDS_DIR:/data:ro" \
     -B "$OUT_DIR:/out" \
     -B "$WORK_DIR:/work" \
     -B "$FS_LICENSE:/opt/freesurfer/license.txt:ro" \
+    -B "$TEMPLATEFLOW_HOME:/opt/templateflow" \
     "$CONTAINER" \
     /data /out "${CLI[@]}" --work-dir /work --fs-license-file /opt/freesurfer/license.txt
 
@@ -103,10 +116,12 @@ elif [[ "$RUNTIME" == "fmriprep-docker" ]]; then
 
 elif [[ "$RUNTIME" == "docker" ]]; then
   docker run --rm \
+    -e TEMPLATEFLOW_HOME=/opt/templateflow \
     -v "$BIDS_DIR:/data:ro" \
     -v "$OUT_DIR:/out" \
     -v "$WORK_DIR:/work" \
     -v "$FS_LICENSE:/opt/freesurfer/license.txt:ro" \
+    -v "$TEMPLATEFLOW_HOME:/opt/templateflow" \
     "$CONTAINER" \
     /data /out "${CLI[@]}" --fs-license-file /opt/freesurfer/license.txt --work-dir /work
 
