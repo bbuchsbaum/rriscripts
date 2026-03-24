@@ -38,6 +38,14 @@ Keys in the UI
   1 / 2       Change update interval (x0.5 / x2)
   p           Toggle per-process table sorting (CPU vs RSS)
 
+New Features
+------------
+  • Multi-node job support: Automatically detects and displays node count
+  • I/O monitoring: Read/write bytes per second with sparkline history
+  • Enhanced job context: Job name, partition, QOS, runtime, time remaining
+  • Alert thresholds: Warns about CPU underutilization, high memory, excessive forking
+  • R backend detection: Identifies parallel backend (future, parallel, foreach, callr)
+
 Notes & caveats
 ---------------
   * CPU numbers are "core-equivalents": 1.00 == one full core saturated for the interval.
@@ -89,6 +97,11 @@ FORK_RATE_EMA_NEW = 0.3  # weight for new samples
 FORK_RATE_EMA_OLD = 0.7  # weight for old samples
 MAX_RETRIES = 3  # Maximum retry attempts for transient failures
 RETRY_DELAY = 0.01  # Delay between retries in seconds
+
+# Alert threshold defaults
+DEFAULT_CPU_UNDERUTIL_THRESHOLD = 20.0  # % - warn if job using < 20% of allocated CPUs
+DEFAULT_MEM_HIGH_THRESHOLD = 90.0  # % - warn if memory usage > 90%
+DEFAULT_FORK_RATE_THRESHOLD = 50.0  # forks/sec - warn if excessive forking
 
 # Setup logging
 log_file = Path.home() / '.rjobtop.log'
@@ -171,6 +184,19 @@ class ProcSample:
     vms_bytes: int
     start_ticks: int  # since boot
     cmdline: str
+    io_read_bytes: int = 0  # cumulative read bytes
+    io_write_bytes: int = 0  # cumulative write bytes
+
+@dataclass
+class JobContext:
+    """Slurm job context information"""
+    job_name: Optional[str] = None
+    partition: Optional[str] = None
+    qos: Optional[str] = None
+    time_limit: Optional[str] = None
+    start_time: Optional[float] = None  # epoch seconds
+    nodelist: Optional[str] = None
+    num_nodes: int = 1
 
 def parse_stat(path: str) -> Optional[Tuple[int, str, int, int, int, int]]:
     """Return (pid, comm, ppid, utime, stime, starttime) from /proc/<pid>/stat"""
@@ -253,6 +279,26 @@ def read_vms_bytes(pid: int) -> int:
         return vsize
     except Exception:
         return 0
+
+@retry_on_failure(max_retries=2, exceptions=(IOError, OSError))
+def read_io_bytes(pid: int) -> Tuple[int, int]:
+    """Return (read_bytes, write_bytes) from /proc/<pid>/io"""
+    try:
+        with open(f'/proc/{pid}/io', 'r') as f:
+            read_bytes = 0
+            write_bytes = 0
+            for line in f:
+                if line.startswith('read_bytes:'):
+                    read_bytes = int(line.split()[1])
+                elif line.startswith('write_bytes:'):
+                    write_bytes = int(line.split()[1])
+            return read_bytes, write_bytes
+    except (FileNotFoundError, PermissionError):
+        # Process disappeared or no permission
+        return 0, 0
+    except Exception as e:
+        logging.debug(f"Error reading I/O stats for PID {pid}: {e}")
+        return 0, 0
 
 def list_all_pids() -> List[int]:
     pids = []
@@ -531,6 +577,117 @@ def get_alloc_cpus(jobid: Optional[str]) -> Optional[int]:
         return None
     return None
 
+def get_job_context(jobid: Optional[str]) -> Optional[JobContext]:
+    """Fetch comprehensive job context from Slurm"""
+    if not jobid or not scontrol_available():
+        return None
+    try:
+        out = subprocess.check_output(['scontrol', 'show', 'job', '-o', str(jobid)],
+                                      text=True, stderr=subprocess.DEVNULL)
+        ctx = JobContext()
+
+        # Job name
+        m = re.search(r'JobName=(\S+)', out)
+        if m:
+            ctx.job_name = m.group(1)
+
+        # Partition
+        m = re.search(r'Partition=(\S+)', out)
+        if m:
+            ctx.partition = m.group(1)
+
+        # QOS
+        m = re.search(r'QOS=(\S+)', out)
+        if m:
+            ctx.qos = m.group(1)
+
+        # Time limit
+        m = re.search(r'TimeLimit=(\S+)', out)
+        if m:
+            ctx.time_limit = m.group(1)
+
+        # Start time - parse format like "2025-11-22T10:30:15"
+        m = re.search(r'StartTime=(\S+)', out)
+        if m:
+            try:
+                from datetime import datetime
+                start_str = m.group(1)
+                # Handle various formats
+                if start_str not in ('N/A', 'Unknown'):
+                    dt = datetime.strptime(start_str, '%Y-%m-%dT%H:%M:%S')
+                    ctx.start_time = dt.timestamp()
+            except Exception as e:
+                logging.debug(f"Failed to parse start time: {e}")
+
+        # Node list and count
+        m = re.search(r'NodeList=(\S+)', out)
+        if m:
+            ctx.nodelist = m.group(1)
+
+        m = re.search(r'NumNodes=(\d+)', out)
+        if m:
+            ctx.num_nodes = int(m.group(1))
+
+        return ctx
+    except Exception as e:
+        logging.debug(f"Failed to get job context for {jobid}: {e}")
+        return None
+
+def expand_nodelist(nodelist: str) -> List[str]:
+    """Expand Slurm nodelist (e.g., 'node[01-03,05]' -> ['node01', 'node02', 'node03', 'node05'])"""
+    if not nodelist or nodelist in ('N/A', 'None'):
+        return []
+
+    # Try using scontrol show hostname
+    if scontrol_available():
+        try:
+            out = subprocess.check_output(['scontrol', 'show', 'hostname', nodelist],
+                                         text=True, stderr=subprocess.DEVNULL)
+            return [line.strip() for line in out.strip().split('\n') if line.strip()]
+        except Exception:
+            pass
+
+    # Simple fallback: if no brackets, return as-is
+    if '[' not in nodelist:
+        return [nodelist]
+
+    return [nodelist]  # Return unexpanded if we can't parse
+
+def detect_r_parallel_backend(pidset: Set[int]) -> Optional[str]:
+    """Detect which R parallel backend is being used based on process names"""
+    if not pidset:
+        return None
+
+    backends = {
+        'future': False,
+        'parallel': False,
+        'foreach': False,
+        'callr': False
+    }
+
+    for pid in list(pidset)[:50]:  # Sample first 50 PIDs
+        try:
+            cmdline = read_cmdline(pid)
+            if not cmdline:
+                continue
+
+            cmdline_lower = cmdline.lower()
+            if 'future' in cmdline_lower or 'future.apply' in cmdline_lower:
+                backends['future'] = True
+            if 'mccollect' in cmdline_lower or 'mcparallel' in cmdline_lower:
+                backends['parallel'] = True
+            if 'foreach' in cmdline_lower or 'doparallel' in cmdline_lower:
+                backends['foreach'] = True
+            if 'callr' in cmdline_lower or 'r_bg' in cmdline_lower:
+                backends['callr'] = True
+
+        except Exception:
+            continue
+
+    # Return detected backends as comma-separated string
+    detected = [k for k, v in backends.items() if v]
+    return ', '.join(detected) if detected else None
+
 def resolve_target_pids(jobid: Optional[str], stepid: Optional[str], pid_root: Optional[int]) -> List[int]:
     # Priority: pid subtree > job+step > job > SLURM env > else: empty
     if pid_root:
@@ -607,9 +764,10 @@ def sample_procs(pidset: Set[int]) -> Dict[int, ProcSample]:
             rss = read_status_rss_bytes(pid)
             vms = read_vms_bytes(pid)
             cmd = read_cmdline(pid)
+            io_read, io_write = read_io_bytes(pid)
             samples[pid] = ProcSample(pid=pid_i, ppid=ppid, comm=comm, cpu_ticks=utime+stime,
                                        rss_bytes=rss, vms_bytes=vms, start_ticks=start,
-                                       cmdline=cmd)
+                                       cmdline=cmd, io_read_bytes=io_read, io_write_bytes=io_write)
         except Exception:
             continue
     return samples
@@ -642,6 +800,15 @@ class Aggregates:
     rows: List[AggRow]
     alloc_cpus: Optional[int]
     mem_total_bytes: Optional[int]
+    total_io_read_rate: float = 0.0  # bytes/sec
+    total_io_write_rate: float = 0.0  # bytes/sec
+    job_context: Optional[JobContext] = None
+    r_backend: Optional[str] = None
+    alerts: List[str] = None
+
+    def __post_init__(self):
+        if self.alerts is None:
+            self.alerts = []
 
 def validate_regex(pattern: str) -> bool:
     """Validate regex pattern for safety and compilability."""
@@ -695,7 +862,9 @@ def aggregate(s1: Dict[int, ProcSample], s2: Dict[int, ProcSample], interval: fl
     rows = []
     total_cpu = 0.0
     total_rss = 0
-    
+    total_io_read = 0
+    total_io_write = 0
+
     # Use pre-compiled regex if provided, otherwise compile
     regex = compiled_regex
     if regex is None and pattern and validate_regex(pattern):
@@ -713,17 +882,54 @@ def aggregate(s1: Dict[int, ProcSample], s2: Dict[int, ProcSample], interval: fl
         cpu_cores = (d_ticks / CLK_TCK) / max(interval, 1e-6)
         total_cpu += cpu_cores
         total_rss += p2.rss_bytes
+
+        # Calculate I/O rates
+        d_io_read = max(0, p2.io_read_bytes - p1.io_read_bytes)
+        d_io_write = max(0, p2.io_write_bytes - p1.io_write_bytes)
+        total_io_read += d_io_read
+        total_io_write += d_io_write
+
         age = now - (bt + (p2.start_ticks / CLK_TCK))
         if (regex is None) or regex.search(p2.comm) or (p2.cmdline and regex.search(p2.cmdline)):
             rows.append(AggRow(pid=p2.pid, ppid=p2.ppid, comm=p2.comm, cpu_cores=cpu_cores,
                                rss_bytes=p2.rss_bytes, age_s=age, cmdline=p2.cmdline))
+
+    # Convert total I/O to rates (bytes/sec)
+    io_read_rate = total_io_read / max(interval, 1e-6)
+    io_write_rate = total_io_write / max(interval, 1e-6)
+
     # Sort rows by cpu desc, keep top 30 (UI will truncate further)
     rows.sort(key=lambda r: r.cpu_cores, reverse=True)
     return Aggregates(now=now, jobid=None, stepid=None, pid_root=None, pid_count=len(seen2),
                       new_pids=new_pids, died_pids=died_pids, fork_rate_hz=fork_rate_hz,
                       total_cpu_cores=total_cpu, total_rss_bytes=total_rss, cgroup_mem_bytes=None,
                       cpu_hist=deque(maxlen=HISTORY_SIZE), mem_hist=deque(maxlen=HISTORY_SIZE),
-                      rows=rows, alloc_cpus=None, mem_total_bytes=read_meminfo_total_bytes())
+                      rows=rows, alloc_cpus=None, mem_total_bytes=read_meminfo_total_bytes(),
+                      total_io_read_rate=io_read_rate, total_io_write_rate=io_write_rate)
+
+def generate_alerts(agg: Aggregates, cpu_underutil_threshold: float,
+                    mem_high_threshold: float, fork_rate_threshold: float) -> List[str]:
+    """Generate alert messages based on thresholds"""
+    alerts = []
+
+    # CPU underutilization alert
+    if agg.alloc_cpus and agg.alloc_cpus > 0:
+        cpu_pct = 100.0 * agg.total_cpu_cores / agg.alloc_cpus
+        if cpu_pct < cpu_underutil_threshold:
+            alerts.append(f"⚠ CPU underutilized: {cpu_pct:.1f}% (threshold: {cpu_underutil_threshold:.0f}%)")
+
+    # Memory high usage alert
+    if agg.mem_total_bytes and agg.mem_total_bytes > 0:
+        mem_used = agg.cgroup_mem_bytes if agg.cgroup_mem_bytes else agg.total_rss_bytes
+        mem_pct = 100.0 * mem_used / agg.mem_total_bytes
+        if mem_pct > mem_high_threshold:
+            alerts.append(f"⚠ Memory high: {mem_pct:.1f}% (threshold: {mem_high_threshold:.0f}%)")
+
+    # Fork rate alert
+    if agg.fork_rate_hz > fork_rate_threshold:
+        alerts.append(f"⚠ High fork rate: {agg.fork_rate_hz:.1f}/s (threshold: {fork_rate_threshold:.0f}/s)")
+
+    return alerts
 
 def sstat_summary(jobid: str, stepid: Optional[str]) -> Optional[Dict[str, float]]:
     """Use sstat to fetch CPUTime and MaxRSS as a fallback when /proc is unavailable."""
@@ -857,9 +1063,14 @@ def multi_node_snapshot(args) -> int:
     return 0
 
 class UIState:
-    def __init__(self, jobid: Optional[str], stepid: Optional[str], 
-                 pid_root: Optional[int], interval: float, 
-                 pattern: Optional[str], show_all: bool = False):
+    def __init__(self, jobid: Optional[str], stepid: Optional[str],
+                 pid_root: Optional[int], interval: float,
+                 pattern: Optional[str], show_all: bool = False,
+                 enable_alerts: bool = True,
+                 cpu_underutil_threshold: float = DEFAULT_CPU_UNDERUTIL_THRESHOLD,
+                 mem_high_threshold: float = DEFAULT_MEM_HIGH_THRESHOLD,
+                 fork_rate_threshold: float = DEFAULT_FORK_RATE_THRESHOLD,
+                 multi_node: bool = False):
         self.jobid: Optional[str] = jobid
         self.stepid: Optional[str] = stepid
         self.pid_root: Optional[int] = pid_root
@@ -874,8 +1085,24 @@ class UIState:
         self.cgroup_kind_path: Optional[Tuple[str, str]] = None
         self.cpu_hist: deque = deque(maxlen=HISTORY_SIZE)
         self.mem_hist: deque = deque(maxlen=HISTORY_SIZE)
+        self.io_read_hist: deque = deque(maxlen=HISTORY_SIZE)
+        self.io_write_hist: deque = deque(maxlen=HISTORY_SIZE)
         self.compiled_pattern: Optional[re.Pattern] = None
+        self.enable_alerts: bool = enable_alerts
+        self.cpu_underutil_threshold: float = cpu_underutil_threshold
+        self.mem_high_threshold: float = mem_high_threshold
+        self.fork_rate_threshold: float = fork_rate_threshold
+        self.job_context: Optional[JobContext] = None
+        self.r_backend: Optional[str] = None
+        self.multi_node: bool = multi_node
+        self.node_list: List[str] = []
         self._compile_pattern()
+
+        # Fetch job context if available
+        if jobid:
+            self.job_context = get_job_context(jobid)
+            if self.job_context and self.job_context.nodelist:
+                self.node_list = expand_nodelist(self.job_context.nodelist)
 
     def _compile_pattern(self) -> None:
         """Compile and cache the regex pattern."""
@@ -928,31 +1155,69 @@ def draw(stdscr, state: UIState) -> None:
             state.fork_rate_ema = agg.fork_rate_hz
         else:
             state.fork_rate_ema = FORK_RATE_EMA_NEW*agg.fork_rate_hz + FORK_RATE_EMA_OLD*state.fork_rate_ema
+        # Add job context and R backend detection
+        agg.job_context = state.job_context
+        if not state.r_backend and pidset:
+            state.r_backend = detect_r_parallel_backend(pidset)
+        agg.r_backend = state.r_backend
+
+        # Generate alerts
+        if state.enable_alerts:
+            agg.alerts = generate_alerts(agg, state.cpu_underutil_threshold,
+                                        state.mem_high_threshold, state.fork_rate_threshold)
+
         # update history
         state.cpu_hist.append(agg.total_cpu_cores)
         mem_used = cg_mem if cg_mem is not None else agg.total_rss_bytes
         state.mem_hist.append(mem_used)
+        state.io_read_hist.append(agg.total_io_read_rate)
+        state.io_write_hist.append(agg.total_io_write_rate)
 
         stdscr.erase()
-        # Header
+        current_line = 0
+
+        # Header with enhanced job context
         title = "rjobtop"
         ctx = []
-        if state.jobid:
+        if state.job_context:
+            if state.job_context.job_name:
+                ctx.append(f"{state.job_context.job_name}")
+            if state.jobid:
+                ctx.append(f"job {state.jobid}" + (f".{state.stepid}" if state.stepid else ""))
+            if state.job_context.partition:
+                ctx.append(f"part:{state.job_context.partition}")
+            if state.job_context.num_nodes > 1:
+                ctx.append(f"{state.job_context.num_nodes} nodes")
+        elif state.jobid:
             ctx.append(f"job {state.jobid}" + (f".{state.stepid}" if state.stepid else ""))
         if state.pid_root:
             ctx.append(f"pid {state.pid_root}")
         ctx_str = " | ".join(ctx) if ctx else "auto"
-        stdscr.addnstr(0, 0, f"{title} — {ctx_str}", w-1, curses.A_BOLD)
+        stdscr.addnstr(current_line, 0, f"{title} — {ctx_str}", w-1, curses.A_BOLD)
+        current_line += 1
 
-        # Line 1: CPU bar
+        # Show job runtime and time remaining if available
+        if state.job_context and state.job_context.start_time:
+            runtime = time.time() - state.job_context.start_time
+            runtime_str = short_age(runtime)
+            info_line = f"Runtime: {runtime_str}"
+            if state.job_context.time_limit and state.job_context.time_limit not in ('UNLIMITED', 'N/A'):
+                info_line += f"  Limit: {state.job_context.time_limit}"
+            if state.r_backend:
+                info_line += f"  R backend: {state.r_backend}"
+            stdscr.addnstr(current_line, 0, info_line, w-1)
+            current_line += 1
+
+        # CPU bar
         alloc = agg.alloc_cpus or os.cpu_count() or 1
         cpu_pct = 100.0 * agg.total_cpu_cores / max(alloc, 1)
         cpu_line = f"CPU: {agg.total_cpu_cores:6.1f} cores  of {alloc:3d}  ({cpu_pct:5.1f}%)"
         barw = max(10, w - len(cpu_line) - 8)
         bar = cpu_bar(agg.total_cpu_cores, alloc, barw)
-        stdscr.addnstr(1, 0, cpu_line + "  " + bar, w-1)
+        stdscr.addnstr(current_line, 0, cpu_line + "  " + bar, w-1)
+        current_line += 1
 
-        # Line 2: Memory bar
+        # Memory bar
         mem_total = agg.mem_total_bytes
         mem_used_bar = cg_mem if cg_mem is not None else agg.total_rss_bytes
         mem_line = f"Mem: {human_bytes(mem_used_bar):>9}"
@@ -960,13 +1225,26 @@ def draw(stdscr, state: UIState) -> None:
             mem_line += f" / {human_bytes(mem_total):>9}"
         mem_line += "  " + ("[cgroup]" if cg_mem is not None else "[sum RSS]")
         bar = mem_bar(mem_used_bar, mem_total, max(10, w - len(mem_line) - 8))
-        stdscr.addnstr(2, 0, mem_line + "  " + bar, w-1)
+        stdscr.addnstr(current_line, 0, mem_line + "  " + bar, w-1)
+        current_line += 1
 
-        # Line 3: PIDs & forks
+        # I/O line
+        io_line = f"I/O: R:{human_bytes(agg.total_io_read_rate):>9}/s  W:{human_bytes(agg.total_io_write_rate):>9}/s"
+        stdscr.addnstr(current_line, 0, io_line, w-1)
+        current_line += 1
+
+        # PIDs & forks
         fork_line = f"PIDs: {agg.pid_count:5d}   forks/sec: {state.fork_rate_ema:5.2f}   (+{agg.new_pids}/-{agg.died_pids} last {interval:.1f}s)"
-        stdscr.addnstr(3, 0, fork_line, w-1)
+        stdscr.addnstr(current_line, 0, fork_line, w-1)
+        current_line += 1
 
-        # Mini sparklines (CPU and Mem) on lines 4 and 5
+        # Display alerts if any
+        if agg.alerts:
+            for alert in agg.alerts[:2]:  # Show max 2 alerts to save space
+                stdscr.addnstr(current_line, 0, alert, w-1, curses.A_REVERSE)
+                current_line += 1
+
+        # Mini sparklines for CPU, Mem, and I/O
         def render_spark(hist: deque, width: int, y: int, label: str, scale: float):
             # scale is max value to map to full height 8 chars
             chars = SPARK_CHARS
@@ -985,12 +1263,22 @@ def draw(stdscr, state: UIState) -> None:
                 out.append(chars[idx])
             stdscr.addnstr(y, 0, f"{label}: " + "".join(out), w-1)
 
-        render_spark(state.cpu_hist, min(80, w-10), 4, "cpu", max(alloc,1))
+        spark_width = min(80, w-10)
+        render_spark(state.cpu_hist, spark_width, current_line, "cpu", max(alloc,1))
+        current_line += 1
         # For memory, scale by MemTotal
-        render_spark(state.mem_hist, min(80, w-10), 5, "mem", agg.mem_total_bytes or max(state.mem_hist) or 1)
+        render_spark(state.mem_hist, spark_width, current_line, "mem", agg.mem_total_bytes or max(state.mem_hist) or 1)
+        current_line += 1
+        # I/O sparklines
+        max_io_read = max(state.io_read_hist) if state.io_read_hist else 1
+        max_io_write = max(state.io_write_hist) if state.io_write_hist else 1
+        render_spark(state.io_read_hist, spark_width, current_line, "I/O-R", max_io_read)
+        current_line += 1
+        render_spark(state.io_write_hist, spark_width, current_line, "I/O-W", max_io_write)
+        current_line += 1
 
         # Table header
-        table_y = 7
+        table_y = current_line
         stdscr.addnstr(table_y, 0,
                        f"{'PID':>7} {'PPID':>7} {'CPU(cores)':>11} {'RSS':>10} {'AGE':>8}  COMM",
                        w-1, curses.A_UNDERLINE)
@@ -1045,7 +1333,7 @@ def main():
         print("This tool is designed to run on Linux compute nodes in HPC clusters")
         sys.exit(1)
     
-    parser = argparse.ArgumentParser(description="rjobtop — focus view of a Slurm job's CPU+Memory utilization (esp. R forks)")
+    parser = argparse.ArgumentParser(description="rjobtop — focus view of a Slurm job's CPU+Memory+I/O utilization (esp. R forks)")
     parser.add_argument('--job', help='Slurm JobID to monitor')
     parser.add_argument('--step', help='Optional Slurm StepID (e.g., 0 or batch); otherwise all steps')
     parser.add_argument('--pid', type=int, help='Monitor a PID subtree instead of Slurm job')
@@ -1056,6 +1344,18 @@ def main():
     parser.add_argument('--json', action='store_true', help='Output snapshot as JSON (implies --once)')
     parser.add_argument('--multi', action='store_true', help='Collect one snapshot from each allocated node via srun (requires --job; implies --once)')
     parser.add_argument('--nodes', help='Comma- or space-separated node list to sample (implies --multi)')
+
+    # Alert threshold options
+    parser.add_argument('--no-alerts', action='store_true', help='Disable alert threshold warnings')
+    parser.add_argument('--cpu-underutil-threshold', type=float, default=DEFAULT_CPU_UNDERUTIL_THRESHOLD,
+                        help=f'CPU underutilization alert threshold in %% (default {DEFAULT_CPU_UNDERUTIL_THRESHOLD})')
+    parser.add_argument('--mem-high-threshold', type=float, default=DEFAULT_MEM_HIGH_THRESHOLD,
+                        help=f'Memory high usage alert threshold in %% (default {DEFAULT_MEM_HIGH_THRESHOLD})')
+    parser.add_argument('--fork-rate-threshold', type=float, default=DEFAULT_FORK_RATE_THRESHOLD,
+                        help=f'Fork rate alert threshold in forks/sec (default {DEFAULT_FORK_RATE_THRESHOLD})')
+
+    # Multi-node support
+    parser.add_argument('--multi-node', action='store_true', help='Enable multi-node monitoring (experimental)')
 
     args = parser.parse_args()
 
@@ -1081,7 +1381,12 @@ def main():
         sys.exit(rc)
 
     state = UIState(jobid=args.job, stepid=args.step, pid_root=args.pid,
-                    interval=args.interval, pattern=args.pattern, show_all=False)
+                    interval=args.interval, pattern=args.pattern, show_all=False,
+                    enable_alerts=not args.no_alerts,
+                    cpu_underutil_threshold=args.cpu_underutil_threshold,
+                    mem_high_threshold=args.mem_high_threshold,
+                    fork_rate_threshold=args.fork_rate_threshold,
+                    multi_node=args.multi_node)
     curses.wrapper(draw, state)
 
 if __name__ == '__main__':

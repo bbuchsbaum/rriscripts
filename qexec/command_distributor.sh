@@ -12,8 +12,8 @@
 #   <number_of_batches>   Total number of batches (should match the SLURM array job size).
 #   [jobs_per_batch]      Optional. Number of concurrent jobs to run in GNU Parallel (default: 40).
 
-# Exit immediately if a command exits with a non-zero status
-set -e
+# Exit on error, unset variable, or pipe failure
+set -euo pipefail
 
 # Function to display usage information
 usage() {
