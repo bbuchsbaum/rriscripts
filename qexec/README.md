@@ -9,7 +9,7 @@ A suite of shell scripts for submitting and managing jobs on SLURM clusters. Des
 | Script | What it does |
 |---|---|
 | **cmd_expand.sh** | Expands a parameterized command into a list of concrete commands via Cartesian product or positional zip. Pure text transformation — no SLURM dependency. |
-| **qexec.sh** | Submits a single job to SLURM: `salloc` for interactive sessions, `sbatch` for batch jobs. Handles time, memory, CPUs, array indices, logging, and OpenMP threading. The parser is now portable across BSD/macOS/Linux shells and supports both `--flag value` and `--flag=value` forms. |
+| **qexec.sh** | Submits a single job to SLURM: `salloc` for interactive sessions, `sbatch` for batch jobs. Handles time, memory, CPUs, array indices, logging, and OpenMP threading. The parser is portable across BSD/macOS/Linux shells and supports both `--flag value` and `--flag=value` forms. |
 | **command_distributor.sh** | Runs inside a SLURM array task. Splits a command file into batches by `SLURM_ARRAY_TASK_ID` and executes its share via GNU Parallel. |
 | **batch_exec.sh** | Orchestrator that ties the above together: expands commands with `cmd_expand.sh`, then submits them as a SLURM array job that uses `command_distributor.sh` to distribute work across nodes. |
 

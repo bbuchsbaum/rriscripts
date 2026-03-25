@@ -126,14 +126,14 @@ python3 fmriprep_launcher.py print-cmd \
 
 ### 6. Rerun failed subjects from a previous job bundle
 
-Every `slurm-array` bundle now writes:
+Every `slurm-array` bundle writes:
 
 - `fmriprep_array.sbatch`
 - `subjects.txt`
 - `job_manifest.json`
 - `status/` containing per-subject `.running`, `.ok`, and `.failed` markers
 
-To generate a new bundle containing only failed subjects:
+To generate a bundle containing only failed subjects:
 
 ```bash
 python3 fmriprep_launcher.py rerun-failed \
@@ -151,7 +151,7 @@ python3 fmriprep_launcher.py rerun-failed \
     --job-name fmriprep_retry
 ```
 
-This writes a fresh rerun bundle without mutating the original one.
+This writes a rerun bundle without mutating the original one.
 
 ## Configuration Files
 

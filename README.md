@@ -26,7 +26,7 @@ Tools for building and submitting [fMRIPrep](https://fmriprep.org) preprocessing
 - **Express wizard** (`wizard --quick`) — only asks 3-5 questions when a project config file is present; derives everything else from config/env
 - **fmriprep_gui_tk.py** / **fmriprep_tui_autocomplete.py** — graphical (Tk) and terminal (Textual) UI front-ends
 - **TemplateFlow support** — automatically binds and validates TemplateFlow caches for air-gapped compute nodes
-- **Retry support** — generated job bundles now include `job_manifest.json` plus per-subject `status/` markers so failed subjects can be resubmitted with `rerun-failed`
+- **Retry support** — generated job bundles include `job_manifest.json` plus per-subject `status/` markers so failed subjects can be resubmitted with `rerun-failed`
 - **Config system** — cascading INI configs (system → user → project → CLI) so you set paths once and reuse
 
 See the full **[fMRIPrep README](fmriprep/README.md)** for usage examples, configuration guide, TemplateFlow setup, and cluster-specific notes.
