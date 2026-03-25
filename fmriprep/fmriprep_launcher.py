@@ -198,6 +198,7 @@ def _build_user_config():
         "# work = /scratch/$USER/fmriprep_work",
         "",
         "# ── Container ──",
+        "# 'singularity' works for both Singularity and Apptainer",
         "runtime = singularity",
         "# container = /project/def-piname/shared/bin/fmriprep_24.1.0.sif",
         "",
@@ -260,6 +261,7 @@ def _build_project_config(target_dir, global_cfg):
     lines += [
         "",
         "# ── Container ──",
+        "# 'singularity' works for both Singularity and Apptainer",
         f"runtime = {val('runtime', 'singularity')}",
     ]
     if val("container"):

@@ -298,6 +298,57 @@ Configure the path via:
 - Environment: `export TEMPLATEFLOW_HOME=/path/to/templateflow`
 - CLI flag: `--templateflow-home /path/to/templateflow`
 
+## Getting the Container Image
+
+fMRIPrep runs inside a container. You need to download or build the image once,
+then point your config at it.
+
+### Singularity / Apptainer (HPC clusters)
+
+Run this on a **login node** (compute nodes typically have no internet):
+
+```bash
+# Pick a version from https://hub.docker.com/r/nipreps/fmriprep/tags
+VERSION=24.1.0
+
+# Build the .sif file (may take 15-30 minutes)
+singularity build fmriprep_${VERSION}.sif docker://nipreps/fmriprep:${VERSION}
+# or with Apptainer:
+apptainer pull docker://nipreps/fmriprep:${VERSION}
+```
+
+Put the `.sif` file in a shared project directory so lab members can reuse it:
+
+```bash
+mv fmriprep_${VERSION}.sif /project/def-piname/shared/bin/
+```
+
+Then set it in your config:
+
+```ini
+container = /project/def-piname/shared/bin/fmriprep_24.1.0.sif
+```
+
+Or point `FMRIPREP_SIF_DIR` at the directory and use `container = auto`:
+
+```bash
+export FMRIPREP_SIF_DIR=/project/def-piname/shared/bin
+```
+
+### Docker (local workstation)
+
+```bash
+docker pull nipreps/fmriprep:24.1.0
+```
+
+The launcher auto-discovers local Docker images — no config path needed.
+
+### Checking the latest version
+
+The latest version is listed at
+[hub.docker.com/r/nipreps/fmriprep/tags](https://hub.docker.com/r/nipreps/fmriprep/tags)
+and [fmriprep.org/en/latest/changes.html](https://fmriprep.org/en/latest/changes.html).
+
 ## Supported Runtimes
 
 | Runtime | Container type | Auto-detected via |
