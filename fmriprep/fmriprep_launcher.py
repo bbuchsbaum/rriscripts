@@ -1225,12 +1225,20 @@ Environment Variables:
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("--config", type=str, help="Path to additional config file (overrides defaults)")
-    
-    # Parse just the config arg first
-    config_args, remaining = ap.parse_known_args()
-    
+
+    # Pre-scan sys.argv for --config so we can load defaults before building
+    # subparsers. This avoids parse_known_args() which swallows --help.
+    config_path = None
+    for i, arg in enumerate(sys.argv[1:], 1):
+        if arg == "--config" and i + 1 < len(sys.argv):
+            config_path = sys.argv[i + 1]
+            break
+        if arg.startswith("--config="):
+            config_path = arg.split("=", 1)[1]
+            break
+
     # Load configuration defaults
-    config = load_config([config_args.config] if config_args.config else [])
+    config = load_config([config_path] if config_path else [])
     
     # Now add subparsers
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1238,9 +1246,9 @@ Environment Variables:
     # init
     p_init = sub.add_parser("init", help="Generate a starter fmriprep config file",
                             epilog="Examples:\n"
-                                   "  %(prog)s init --user          # Create ~/.config/fmriprep/config.ini\n"
-                                   "  %(prog)s init                 # Create ./fmriprep.ini for this dataset\n"
-                                   "  %(prog)s init /path/to/bids   # Create fmriprep.ini in a BIDS directory\n",
+                                   "  %(prog)s --user          # Create ~/.config/fmriprep/config.ini\n"
+                                   "  %(prog)s                 # Create ./fmriprep.ini for this dataset\n"
+                                   "  %(prog)s /path/to/bids   # Create fmriprep.ini in a BIDS directory\n",
                             formatter_class=argparse.RawDescriptionHelpFormatter)
     p_init.add_argument("dir", nargs="?", default=".",
                         help="Target directory for project config (default: current directory)")
