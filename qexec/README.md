@@ -17,7 +17,7 @@ A suite of shell scripts for submitting and managing jobs on SLURM clusters. Des
 
 | Script | What it does |
 |---|---|
-| **bexec.sh** | Older batch executor. Takes a pre-written command file (`-f commands.txt`) and submits it as an array job via `qexec.sh` + `command_distributor.sh`. |
+| **bexec.sh** | File-oriented batch submitter. Takes a pre-written command file (`-f commands.txt`) and submits it as an array job via `qexec.sh` + `command_distributor.sh`. Use this when you already have a commands file; use `batch_exec.sh` when you want expansion + submission in one step. |
 | **send_slurm.sh** | Pipe-friendly interface: reads commands from stdin, persists the generated command list/runner under `.qexec-state` (or `--state-dir`), and submits them as a SLURM array job. Useful with `cmd_expand.sh \| send_slurm.sh`. |
 | **rjobtop.py** | Live monitoring of a running SLURM job's CPU and memory utilization. Shows per-process breakdown, fork rate, and ASCII sparklines. Useful for R/future/callr workloads. |
 | **slurm_job_monitor.sh** | Polls SLURM jobs until completion, then reports efficiency via `seff`. Optional email or desktop notifications. |
@@ -41,21 +41,34 @@ Both GUIs include input validation, tooltips on every field, a scrollable output
 The typical workflow for running many parameterized jobs:
 
 ```
-cmd_expand.sh                    batch_exec.sh (orchestrator)
-  Expands parameters      --->     Calls cmd_expand.sh
-  into N commands                  Writes commands to a file
-                                   Submits via qexec.sh
-                                        |
-                                        v
-                                   qexec.sh
-                                     Submits sbatch --array=1-K
-                                        |
-                                        v
-                              command_distributor.sh
-                                (runs on each node)
-                                Reads its share of commands
-                                Executes via GNU Parallel
+Option A: All-in-one (batch_exec.sh)
+
+  batch_exec.sh "cmd [1..100] [a,b]"
+    1. Calls cmd_expand.sh → expands to N commands
+    2. Writes commands to a file
+    3. Submits via qexec.sh --array=1-K
+            |
+            v
+      command_distributor.sh (runs on each node)
+        Splits commands among K nodes
+        Executes its share via GNU Parallel
+
+Option B: Pre-made command file → batched across nodes (bexec.sh)
+
+  cmd_expand.sh "cmd [1..100]" > commands.txt   # or write by hand
+  bexec.sh -f commands.txt -n 5
+    Submits via qexec.sh → command_distributor.sh (same as above)
+
+Option C: Pre-made command file → one task per command (qexec.sh --cmd-file)
+
+  qexec.sh --cmd-file commands.txt
+    Submits sbatch --array=1-N (one SLURM task per line)
+    Each task runs exactly one command — no GNU Parallel
 ```
+
+Use **A** or **B** when you have many commands and want to batch them onto
+fewer nodes. Use **C** when each command needs its own dedicated SLURM task
+(e.g. long-running jobs that each need full node resources).
 
 ### Example: Run an R script over 100 subjects on 5 nodes
 
