@@ -837,11 +837,14 @@ def cmd_wizard_quick(args, config):
         mem = None if no_mem else config.get('slurm_mem', mb_to_human(mem_mb))
         module_sing = runtime == "singularity"
 
+        status_dir = outdir / "status"
+        status_dir.mkdir(parents=True, exist_ok=True)
+
         script_text = create_slurm_script(
             cfg=cfg, subject_file=subj_file, partition=partition, time=time,
             cpus_per_task=cpus_per_task, mem=mem, account=account, email=email,
-            mail_type=mail_type, log_dir=log_dir, module_singularity=module_sing,
-            job_name=job_name
+            mail_type=mail_type, log_dir=log_dir, status_dir=status_dir,
+            module_singularity=module_sing, job_name=job_name
         )
         script_path = outdir / "fmriprep_array.sbatch"
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -1203,11 +1206,14 @@ def cmd_wizard(args):
         
         module_singularity = ask("Insert 'module load singularity'? (y/n)", choices=["y","n"]) == "y"
 
+        status_dir = outdir / "status"
+        status_dir.mkdir(parents=True, exist_ok=True)
+
         script_text = create_slurm_script(
             cfg=cfg, subject_file=subj_file, partition=partition, time=time,
             cpus_per_task=cpus_per_task, mem=mem, account=account, email=email,
-            mail_type=mail_type, log_dir=log_dir, module_singularity=module_singularity,
-            job_name=job_name
+            mail_type=mail_type, log_dir=log_dir, status_dir=status_dir,
+            module_singularity=module_singularity, job_name=job_name
         )
         script_path = outdir / "fmriprep_array.sbatch"
         log_dir.mkdir(parents=True, exist_ok=True)
