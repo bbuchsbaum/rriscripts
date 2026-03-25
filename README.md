@@ -43,11 +43,12 @@ Each sub-project can be installed independently to `~/bin`:
 # SLURM job submission toolkit
 curl -fsSL https://raw.githubusercontent.com/bbuchsbaum/rriscripts/main/qexec/install.sh | bash
 
-# fMRIPrep launcher
+# fMRIPrep launcher (installs to ~/.local/share/fmriprep, symlinks to ~/bin)
 curl -fsSL https://raw.githubusercontent.com/bbuchsbaum/rriscripts/main/fmriprep/install.sh | bash
 ```
 
-To install to a different directory, append `-- --prefix /your/dir`. Or clone the whole repo:
+Use `-- --prefix /dir` (qexec) or `-- --lib-dir /dir --bin-dir /dir` (fmriprep)
+to customize install paths. Or clone the whole repo:
 
 ```bash
 git clone https://github.com/bbuchsbaum/rriscripts.git

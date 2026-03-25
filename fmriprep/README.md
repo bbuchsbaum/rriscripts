@@ -336,16 +336,21 @@ This creates array tasks where each runs 4 subjects in parallel via `xargs`. Res
 
 ## Installation
 
-Download all fmriprep launcher scripts to `~/bin` in one command:
+Install all fmriprep launcher files to `~/.local/share/fmriprep` with entry
+point symlinks in `~/bin`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/bbuchsbaum/rriscripts/main/fmriprep/install.sh | bash
 ```
 
-To install to a different directory:
+This keeps `~/bin` clean — only `fmriprep_launcher.py` and
+`run_fmriprep_wizard.sh` are symlinked there; the Python modules they import
+live together in `~/.local/share/fmriprep/`.
+
+To customize the directories:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/bbuchsbaum/rriscripts/main/fmriprep/install.sh | bash -s -- --prefix /opt/bin
+curl -fsSL ... | bash -s -- --lib-dir ~/.fmriprep --bin-dir /opt/bin
 ```
 
 Or clone the repo and add to your PATH:
