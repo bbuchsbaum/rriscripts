@@ -9,6 +9,7 @@ the launcher, Textual frontend, Tk frontend, and legacy questionary builder.
 from __future__ import annotations
 
 import configparser
+import os
 import re
 import shutil
 import subprocess
@@ -50,7 +51,8 @@ def load_config(config_paths: List[str] | None = None) -> Dict[str, str]:
                 for key, value in config["slurm"].items():
                     defaults[f"slurm_{key}"] = value
 
-    return defaults
+    # Expand $VAR and ~ in all values
+    return {k: os.path.expandvars(os.path.expanduser(v)) for k, v in defaults.items()}
 
 
 def which(cmd: str) -> Optional[str]:
