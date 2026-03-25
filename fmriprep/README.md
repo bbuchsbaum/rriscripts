@@ -64,23 +64,33 @@ python3 fmriprep_launcher.py probe
 
 Shows detected runtimes (Singularity/Docker), available container images, FreeSurfer license location, and TemplateFlow status.
 
-### 2. Create a project config
+### 2. Create config files
 
-Generate a starter config in your BIDS directory:
+First, create a **user-level config** with your cluster infrastructure (once):
 
 ```bash
-python3 fmriprep_launcher.py init /path/to/my_study
+python3 fmriprep_launcher.py init --user
+# Writes ~/.config/fmriprep/config.ini
 ```
 
-This creates `fmriprep.ini` with sensible defaults. If you have a user-level
-config (`~/.fmriprep.ini`), its values are pre-filled automatically — so
-cluster paths, container locations, and account names carry over without
-retyping. Edit the generated file to set dataset-specific values (subjects,
-output spaces, etc.).
+Edit it to fill in your container path, FreeSurfer license, account name, etc.
+These values are shared across all projects.
+
+Then, for each dataset, create a **project config**:
+
+```bash
+cd /path/to/my_study
+python3 fmriprep_launcher.py init
+# Writes ./fmriprep.ini, pre-filled from your user config
+```
+
+The project config automatically picks up values from your user config, so you
+only need to set dataset-specific things (`bids`, `out`, `subjects`, etc.).
 
 Options:
-- `--force` — overwrite an existing `fmriprep.ini`
-- Omit the directory argument to write into the current directory
+- `--user` — generate user-level config at `~/.config/fmriprep/config.ini`
+- `--force` — overwrite an existing config file
+- `init /path/to/dir` — write project config to a specific directory
 
 You can also copy an example manually:
 
