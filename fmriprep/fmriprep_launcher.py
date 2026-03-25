@@ -1180,49 +1180,33 @@ def main():
     ap = argparse.ArgumentParser(
         prog="fmriprep_launcher", 
         description="One-stop fMRIPrep command & Slurm script generator",
-        epilog="""
-Configuration Files:
-  Defaults can be set in INI-format config files. Files are read in order:
-    1. /etc/fmriprep/config.ini (system-wide)
-    2. ~/.config/fmriprep/config.ini or ~/.fmriprep.ini (user)
-    3. ./fmriprep.ini (project-specific)
-    4. File specified with --config (highest priority)
-  
-  Config file format:
-    [defaults]
-    bids = /path/to/bids
-    work = /scratch/work
-    container = /path/to/fmriprep.sif
-    fs_license = /path/to/license.txt
-    runtime = singularity
-    nprocs = 8
-    omp_threads = 2
-    mem_mb = 32000
-    skip_bids_validation = true
-    output_spaces = MNI152NLin2009cAsym:res-2 T1w
-    use_aroma = false
-    cifti_output = false
-    fs_reconall = false
-    use_syn_sdc = false
-    extra = --stop-on-first-crash
-    subjects = sub-01 sub-02  # or 'all'
-    
-    [slurm]
-    partition = compute
-    time = 24:00:00
-    cpus_per_task = 8
-    mem = 32G
-    account = rrg-mylab
-    email = user@university.edu
-    mail_type = END,FAIL
-    job_name = fmriprep
-    script_outdir = ./fmriprep_job
-    log_dir = /scratch/logs
+        epilog="""Run '<subcommand> --help' for subcommand-specific options.
 
-Environment Variables:
-  FMRIPREP_SIF_DIR - Directory containing .sif/.simg files
-  FS_LICENSE - FreeSurfer license path (fallback if not in config)
-  SLURM_* - Various SLURM variables for resource detection
+Getting started:
+  %(prog)s init --user           Create user-level config (~/.config/fmriprep/config.ini)
+  %(prog)s init                  Create project config (./fmriprep.ini) in current directory
+  %(prog)s probe                 Show detected runtimes and containers
+  %(prog)s wizard --quick        Interactive setup (asks only what's missing from config)
+
+Config files are read in priority order (later overrides earlier):
+  1. /etc/fmriprep/config.ini    2. ~/.config/fmriprep/config.ini
+  3. ./fmriprep.ini              4. --config FILE
+
+  [defaults]                          [slurm]
+  bids, out, work        (paths)      partition    (default: compute)
+  runtime                (singularity/docker/auto)  time  (default: 24:00:00)
+  container              (path or auto)             account
+  fs_license             (path)       job_name     (default: fmriprep)
+  templateflow_home      (path)       log_dir, script_outdir
+  nprocs, omp_threads    (int)        cpus_per_task, mem
+  mem_mb                 (int/32G)    email, mail_type
+  output_spaces          (string)     no_mem       (bool, for Trillium)
+  skip_bids_validation   (bool)       module_singularity (bool)
+  fs_reconall, use_syn_sdc (bool)
+  cifti_output           (bool)
+  subjects, extra
+
+Environment variables: FMRIPREP_SIF_DIR, FS_LICENSE, TEMPLATEFLOW_HOME
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
