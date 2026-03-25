@@ -17,16 +17,17 @@ The important distinction is:
 For most users, the recommended path is:
 
 1. Probe your environment.
-2. Create a project `fmriprep.ini`.
-3. Run `fmriprep_launcher.py wizard --quick`.
-4. Use `print-cmd` or `slurm-array` directly once the config is stable.
-5. If some subjects fail, use `rerun-failed` on the generated `job_manifest.json`.
+2. Generate a project config with `fmriprep_launcher.py init`.
+3. Edit the generated `fmriprep.ini` for your dataset.
+4. Run `fmriprep_launcher.py wizard --quick`.
+5. Use `print-cmd` or `slurm-array` directly once the config is stable.
+6. If some subjects fail, use `rerun-failed` on the generated `job_manifest.json`.
 
 ### Canonical Entry Points
 
 | File | Status | Purpose |
 |---|---|---|
-| **fmriprep_launcher.py** | Recommended | Main CLI with subcommands: `probe`, `print-cmd`, `slurm-array`, `rerun-failed`, and `wizard`. Owns runtime detection, config loading, subject discovery, command generation, SLURM script generation, and retry bundle generation for failed subjects. |
+| **fmriprep_launcher.py** | Recommended | Main CLI with subcommands: `init`, `probe`, `print-cmd`, `slurm-array`, `rerun-failed`, and `wizard`. Owns runtime detection, config loading, subject discovery, command generation, SLURM script generation, and retry bundle generation for failed subjects. |
 | **run_fmriprep_wizard.sh** | Convenience | Wrapper that activates a likely virtualenv and launches `fmriprep_launcher.py wizard`. |
 | **fmriprep_project_example.ini** | Recommended | Project-level config example (`./fmriprep.ini`). This is the most useful config file for repeatable runs. |
 | **fmriprep_config_example.ini** | Optional | User-level config example (`~/.config/fmriprep/config.ini`). Useful for personal defaults shared across projects. |
@@ -65,18 +66,42 @@ Shows detected runtimes (Singularity/Docker), available container images, FreeSu
 
 ### 2. Create a project config
 
-The launcher reads INI-format config files in priority order:
+Generate a starter config in your BIDS directory:
+
+```bash
+python3 fmriprep_launcher.py init /path/to/my_study
+```
+
+This creates `fmriprep.ini` with sensible defaults. If you have a user-level
+config (`~/.fmriprep.ini`), its values are pre-filled automatically — so
+cluster paths, container locations, and account names carry over without
+retyping. Edit the generated file to set dataset-specific values (subjects,
+output spaces, etc.).
+
+Options:
+- `--force` — overwrite an existing `fmriprep.ini`
+- Omit the directory argument to write into the current directory
+
+You can also copy an example manually:
+
+```bash
+cp fmriprep_project_example.ini /path/to/my_study/fmriprep.ini
+```
+
+The launcher reads INI-format config files in priority order (later files
+override earlier ones):
 
 1. `/etc/fmriprep/config.ini` (system-wide)
 2. `~/.config/fmriprep/config.ini` or `~/.fmriprep.ini` (user)
 3. `./fmriprep.ini` (project-specific — recommended)
 4. `--config path/to/file.ini` (explicit override)
 
-Later files override earlier ones.
+The recommended split is:
 
-```bash
-cp fmriprep_project_example.ini /path/to/my_study/fmriprep.ini
-```
+- **User config** (`~/.fmriprep.ini`): stable infrastructure — `runtime`,
+  `container`, `fs_license`, `templateflow_home`, `account`, `partition`.
+- **Project config** (`./fmriprep.ini`): dataset-specific — `bids`, `out`,
+  `work`, `subjects`, `output_spaces`, `job_name`, `log_dir`.
 
 ### 3. Express wizard for normal use
 
@@ -153,7 +178,7 @@ python3 fmriprep_launcher.py rerun-failed \
 
 This writes a rerun bundle without mutating the original one.
 
-## Configuration Files
+## Configuration File Reference
 
 A well-populated project config eliminates most wizard questions:
 
@@ -182,6 +207,49 @@ account = rrg-mypi
 job_name = fmriprep_mystudy
 log_dir = /scratch/myuser/fmriprep_logs
 ```
+
+### `[defaults]` keys
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `bids` | path | *(required)* | BIDS dataset root directory |
+| `out` | path | *(required)* | Output directory (usually `<bids>/derivatives/fmriprep`) |
+| `work` | path | *(required)* | Working directory (use fast scratch storage) |
+| `runtime` | string | `auto` | Container runtime: `singularity`, `docker`, `fmriprep-docker`, or `auto` |
+| `container` | path/string | `auto` | Path to `.sif` file, Docker `image:tag`, or `auto` to search `$FMRIPREP_SIF_DIR` |
+| `fs_license` | path | `$FS_LICENSE` | Path to FreeSurfer `license.txt` |
+| `templateflow_home` | path | `$TEMPLATEFLOW_HOME` | Path to pre-populated TemplateFlow cache |
+| `nprocs` | int | auto-detect | `--nprocs` passed to fMRIPrep |
+| `omp_threads` | int | `min(8, nprocs)` | `--omp-nthreads` passed to fMRIPrep |
+| `mem_mb` | int/string | ~90% of available | Memory limit in MB (also accepts `32G`, `2T`) |
+| `output_spaces` | string | — | Space-separated list, e.g. `MNI152NLin2009cAsym:res-2 T1w fsnative` |
+| `skip_bids_validation` | bool | `false` | Pass `--skip-bids-validation` |
+| `fs_reconall` | bool | `false` | Run FreeSurfer `recon-all` |
+| `use_syn_sdc` | bool | `false` | Enable SyN-based fieldmap-less distortion correction |
+| `cifti_output` | bool | `false` | Generate CIFTI outputs |
+| `use_aroma` | bool | `false` | **Deprecated** — removed in fMRIPrep >= 23.1.0 |
+| `extra` | string | — | Extra flags appended verbatim to the fMRIPrep command |
+| `subjects` | string | — | `all` or space-separated list (e.g. `sub-01 sub-02`) |
+
+### `[slurm]` keys
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `partition` | string | `compute` | SLURM partition name |
+| `time` | string | `24:00:00` | Walltime limit (`HH:MM:SS`) |
+| `account` | string | — | SLURM account/allocation (e.g. `def-piname`) |
+| `job_name` | string | `fmriprep` | SLURM job name |
+| `log_dir` | path | `<script_outdir>/logs` | Directory for SLURM stdout/stderr logs |
+| `script_outdir` | path | `./fmriprep_job` | Where to write the generated sbatch script and subject list |
+| `cpus_per_task` | int | from `nprocs` | Override `--cpus-per-task` in the SLURM header |
+| `mem` | string | from `mem_mb` | SLURM `--mem` value (e.g. `32G`). Use `none` to omit |
+| `no_mem` | bool | `false` | Omit `--mem` entirely (for whole-node clusters like Trillium) |
+| `email` | string | — | Email address for SLURM notifications |
+| `mail_type` | string | — | SLURM mail events (e.g. `END,FAIL`) |
+| `module_singularity` | bool | `false` | Insert `module load singularity` in the generated script |
+
+Boolean values are case-insensitive (`true`/`True`/`TRUE` all work). Inline
+comments use `#` (preferred) or `;`.
 
 Use INI for all current workflows. The JSON example files in this directory are
 legacy artifacts and are not loaded by `fmriprep_launcher.py`.
