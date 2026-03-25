@@ -17,6 +17,7 @@ import os
 import sys
 from pathlib import Path
 
+from fmriprep_backend import BuildConfig, build_fmriprep_command, create_slurm_script, write_subject_batches
 from fmriprep_shared import (
     default_resources_from_env,
     detect_runtime_optional,
@@ -43,95 +44,6 @@ class PathExistsValidator(Validator):
 def ensure_dir(p: Path):
     p.mkdir(parents=True, exist_ok=True)
     return p
-
-def strip_sub_prefix(label: str):
-    return label[4:] if label.startswith("sub-") else label
-
-
-# ---------------- SLURM template ----------------
-
-SLURM_TEMPLATE = """\
-#!/usr/bin/env bash
-#SBATCH --job-name={job_name}
-#SBATCH --partition={partition}
-#SBATCH --time={time}
-#SBATCH --cpus-per-task={cpus}
-{mem_line}#SBATCH --nodes=1
-#SBATCH --array=0-{array_max}
-#SBATCH --output={log_dir}/%x_%A_%a.out
-#SBATCH --error={log_dir}/%x_%A_%a.err
-{account}{mail}
-
-set -euo pipefail
-
-BIDS_DIR="{bids}"
-OUT_DIR="{out}"
-WORK_DIR="{work}"
-FS_LICENSE="{fs_license}"
-SUBJECT_FILE="{subject_file}"
-RUNTIME="{runtime}"
-CONTAINER="{container}"
-NPROCS="{nprocs}"
-OMP="{omp}"
-MEM_MB="{mem_mb}"
-EXTRA="{extra}"
-SKIP_VAL="{skip_val}"
-OUTPUT_SPACES="{output_spaces}"
-AROMA="{aroma}"
-CIFTI="{cifti}"
-RECONALL="{reconall}"
-
-SUBS=($(grep -v '^#' "$SUBJECT_FILE" | sed '/^$/d'))
-SUB="${{SUBS[$SLURM_ARRAY_TASK_ID]}}"
-if [[ -z "$SUB" ]]; then echo "No subject at index $SLURM_ARRAY_TASK_ID"; exit 1; fi
-
-mkdir -p "$OUT_DIR" "$WORK_DIR" "{log_dir}"
-
-CLI=(participant --participant-label "${{SUB#sub-}}" --nprocs "$NPROCS" --omp-nthreads "$OMP" --mem-mb "$MEM_MB" --fs-license-file /opt/freesurfer/license.txt --notrack)
-
-if [[ "$SKIP_VAL" == "1" ]]; then CLI+=(--skip-bids-validation); fi
-if [[ -n "$OUTPUT_SPACES" ]]; then CLI+=(--output-spaces $OUTPUT_SPACES); fi
-if [[ "$AROMA" == "1" ]]; then CLI+=(--use-aroma); fi
-if [[ "$CIFTI" == "1" ]]; then CLI+=(--cifti-output 91k); fi
-if [[ "$RECONALL" == "0" ]]; then CLI+=(--fs-no-reconall); fi
-if [[ -n "$EXTRA" ]]; then
-  read -ra _EXTRA <<< "$EXTRA"
-  CLI+=("${{_EXTRA[@]}}")
-fi
-
-echo "=== fMRIPrep $SUB ==="
-echo "Runtime: $RUNTIME"
-echo "Container: $CONTAINER"
-echo "Command: $RUNTIME ... $SUB"
-echo "----------------------"
-
-if [[ "$RUNTIME" == "singularity" ]]; then
-  RT_BIN=$(command -v singularity || command -v apptainer)
-  "$RT_BIN" run --cleanenv \
-    -B "$BIDS_DIR:/data:ro" \
-    -B "$OUT_DIR:/out" \
-    -B "$WORK_DIR:/work" \
-    -B "$FS_LICENSE:/opt/freesurfer/license.txt:ro" \
-    "$CONTAINER" \
-    /data /out "${{CLI[@]}}" --work-dir /work
-
-elif [[ "$RUNTIME" == "fmriprep-docker" ]]; then
-  fmriprep-docker "$BIDS_DIR" "$OUT_DIR" "${{CLI[@]}}" --work-dir "$WORK_DIR" --fs-license-file "$FS_LICENSE"
-
-elif [[ "$RUNTIME" == "docker" ]]; then
-  docker run --rm \
-    -v "$BIDS_DIR:/data:ro" \
-    -v "$OUT_DIR:/out" \
-    -v "$WORK_DIR:/work" \
-    -v "$FS_LICENSE:/opt/freesurfer/license.txt:ro" \
-    "$CONTAINER" \
-    /data /out "${{CLI[@]}}" --work-dir /work
-
-else
-  echo "Unknown runtime: $RUNTIME"; exit 2
-fi
-"""
-
 
 # ---------------- Main interactive flow ----------------
 
@@ -231,59 +143,28 @@ def main():
     use_syn_sdc = questionary.confirm("Enable SyN SDC (--use-syn-sdc)?", default=False).ask()
     extra = questionary.text('Any extra flags? (e.g. "--stop-on-first-crash --output-layout bids")', default="").ask()
 
-    # Build base CLI (common across runtimes)
-    labels_sans = [strip_sub_prefix(s) for s in selected]
-    label_str = " ".join(labels_sans)
-
-    base_cli = f"participant --participant-label {label_str} --nprocs {nprocs} --omp-nthreads {omp_threads} --mem-mb {mem_mb} --notrack"
-    if skip_bids_val:
-        base_cli += " --skip-bids-validation"
-    if output_spaces.strip():
-        base_cli += f" --output-spaces {output_spaces}"
-    if use_aroma:
-        base_cli += " --use-aroma"
-    if cifti_output:
-        base_cli += " --cifti-output 91k"
-    if not fs_reconall:
-        base_cli += " --fs-no-reconall"
-    if use_syn_sdc:
-        base_cli += " --use-syn-sdc"
-    if extra.strip():
-        base_cli += f" {extra.strip()}"
-
-    # TemplateFlow cache
-    tf_home = Path.home() / ".cache" / "templateflow"
-    ensure_dir(tf_home)
-
-    # Build full command
-    if runtime == "singularity":
-        rt = "$(command -v singularity || command -v apptainer)"
-        full_cmd = (
-            f'{rt} run --cleanenv '
-            f'-B "{bids_dir}:/data:ro" '
-            f'-B "{out_dir}:/out" '
-            f'-B "{work_dir}:/work" '
-            f'-B "{fs_license}:/opt/freesurfer/license.txt:ro" '
-            f'-B "{tf_home}:/templateflow" '
-            f'"{container}" '
-            f'/data /out {base_cli} --work-dir /work --fs-license-file /opt/freesurfer/license.txt'
-        )
-    elif runtime == "fmriprep-docker":
-        full_cmd = (
-            f'fmriprep-docker "{bids_dir}" "{out_dir}" '
-            f'{base_cli} --work-dir "{work_dir}" --fs-license-file "{fs_license}"'
-        )
-    else:  # docker
-        full_cmd = (
-            f'docker run --rm '
-            f'-v "{bids_dir}:/data:ro" '
-            f'-v "{out_dir}:/out" '
-            f'-v "{work_dir}:/work" '
-            f'-v "{fs_license}:/opt/freesurfer/license.txt:ro" '
-            f'-v "{tf_home}:/templateflow" '
-            f'"{container}" '
-            f'/data /out {base_cli} --work-dir /work --fs-license-file /opt/freesurfer/license.txt'
-        )
+    tf_home = ensure_dir(Path.home() / ".cache" / "templateflow")
+    cfg = BuildConfig(
+        bids=bids_dir,
+        out=out_dir,
+        work=work_dir,
+        subjects=selected,
+        container_runtime=runtime,
+        container=container,
+        fs_license=fs_license,
+        templateflow_home=tf_home,
+        omp_threads=omp_threads,
+        nprocs=nprocs,
+        mem_mb=mem_mb,
+        extra=extra,
+        skip_bids_validation=skip_bids_val,
+        output_spaces=output_spaces,
+        use_aroma=use_aroma,
+        cifti_output=cifti_output,
+        fs_reconall=fs_reconall,
+        use_syn_sdc=use_syn_sdc,
+    )
+    commands = [build_fmriprep_command(cfg, subject) for subject in selected]
 
     # Write a simple runner script
     script_path = Path.cwd() / "run_fmriprep.sh"
@@ -292,7 +173,7 @@ set -euo pipefail
 
 # Generated by fMRIPrep Interactive Builder
 echo "Running fMRIPrep on {len(selected)} subject(s): {' '.join(selected)}"
-{full_cmd}
+{"\n".join(" ".join(cmd) for cmd in commands)}
 """
     script_path.write_text(script)
     os.chmod(script_path, 0o755)
@@ -302,7 +183,7 @@ echo "Running fMRIPrep on {len(selected)} subject(s): {' '.join(selected)}"
     if questionary.confirm("Generate a Slurm ARRAY script?", default=True).ask():
         job_dir = ensure_dir(Path.cwd() / "fmriprep_job")
         subj_file = job_dir / "subjects.txt"
-        subj_file.write_text("\n".join(selected) + "\n")
+        write_subject_batches(subj_file, selected)
 
         partition = questionary.text("Slurm partition:", default=os.environ.get("SLURM_JOB_PARTITION", "compute")).ask()
         walltime = questionary.text("Walltime (HH:MM:SS):", default="24:00:00").ask()
@@ -323,44 +204,27 @@ echo "Running fMRIPrep on {len(selected)} subject(s): {' '.join(selected)}"
         ).ask()
         log_dir = Path(log_dir_path).expanduser()
         ensure_dir(log_dir)
+        status_dir = ensure_dir(job_dir / "status")
         
         account = questionary.text("Slurm account (optional):", default="").ask()
         email = questionary.text("Notification email (optional):", default="").ask()
         mail_type = questionary.text("Mail type (e.g. END,FAIL) (optional):", default="").ask()
         job_name = questionary.text("Job name:", default="fmriprep").ask()
 
-        mail_block = ""
-        if email:
-            mail_block += f"#SBATCH --mail-user={email}\n"
-            if mail_type:
-                mail_block += f"#SBATCH --mail-type={mail_type}\n"
-
-        slurm_text = SLURM_TEMPLATE.format(
-            job_name=job_name,
+        slurm_text = create_slurm_script(
+            cfg=cfg,
+            subject_file=subj_file,
             partition=partition,
             time=walltime,
-            cpus=nprocs,
-            mem_line=mem_line,  # Use mem_line instead of mem
-            array_max=max(0, len(selected)-1),
-            log_dir=str(log_dir),  # Use the selected log_dir
-            account=(f"#SBATCH --account={account}\n" if account else ""),
-            mail=mail_block,
-            bids=str(bids_dir),
-            out=str(out_dir),
-            work=str(work_dir),
-            fs_license=str(fs_license),
-            subject_file=str(subj_file),
-            runtime=runtime,
-            container=container,
-            nprocs=nprocs,
-            omp=omp_threads,
-            mem_mb=mem_mb,
-            extra=extra,
-            skip_val="1" if skip_bids_val else "0",
-            output_spaces=output_spaces,
-            aroma="1" if use_aroma else "0",
-            cifti="1" if cifti_output else "0",
-            reconall="1" if fs_reconall else "0",
+            cpus_per_task=nprocs,
+            mem=mem_slurm if use_mem else None,
+            account=account or None,
+            email=email or None,
+            mail_type=mail_type or None,
+            log_dir=log_dir,
+            status_dir=status_dir,
+            module_singularity=runtime == "singularity",
+            job_name=job_name,
         )
         sbatch_path = job_dir / "fmriprep_array.sbatch"
         sbatch_path.write_text(slurm_text)

@@ -59,6 +59,15 @@ setup() {
     [[ "$output" == *"ACCOUNT=myaccount"* ]]
 }
 
+@test "batch dry-run: supports equals-style long options" {
+    run "$QEXEC" --dry-run --time=3 --ncpus=2 --account=myaccount --array=1-3 -- myscript.sh
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"TIME=3"* ]]
+    [[ "$output" == *"NCPUS=2"* ]]
+    [[ "$output" == *"ACCOUNT=myaccount"* ]]
+    [[ "$output" == *"ARRAY=1-3"* ]]
+}
+
 @test "batch dry-run: log directory" {
     run "$QEXEC" --dry-run -l /tmp/logs -- myscript.sh
     [ "$status" -eq 0 ]
@@ -70,6 +79,7 @@ setup() {
     [ "$status" -eq 0 ]
     # The job script content should NOT contain eval
     [[ "$output" != *"eval"* ]]
+    [[ "$output" != *"Enhanced getopt not found"* ]]
 }
 
 @test "batch dry-run: omp threads" {

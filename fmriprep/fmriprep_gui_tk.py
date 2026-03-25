@@ -32,6 +32,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
+from fmriprep_backend import BuildConfig, build_fmriprep_command, create_slurm_script, write_subject_batches
 from fmriprep_shared import (
     default_resources_from_env,
     detect_runtime_auto,
@@ -39,184 +40,10 @@ from fmriprep_shared import (
     discover_subjects,
     docker_list_fmriprep_images,
     mb_to_human,
-    which,
 )
 
-# ---------------- fMRIPrep command building ----------------
-
-def build_fmriprep_cmds(
-    subjects, bids_dir, out_dir, work_dir,
-    runtime, container, fs_license,
-    nprocs, omp, mem_mb,
-    skip_val, output_spaces, aroma, cifti, reconall, syn_sdc, extra,
-    bind_tf=False
-):
-    cmds = []
-    bids_in = "/data"
-    out_in = "/out"
-    work_in = "/work"
-    fs_in = "/opt/freesurfer/license.txt"
-    tf_home = str(Path.home() / ".cache" / "templateflow")
-
-    base_cli = [
-        "participant",
-        "--nprocs", str(nprocs),
-        "--omp-nthreads", str(omp),
-        "--mem-mb", str(mem_mb),
-        "--notrack",
-    ]
-    if skip_val:
-        base_cli += ["--skip-bids-validation"]
-    if output_spaces.strip():
-        base_cli += ["--output-spaces"] + output_spaces.split()
-    if aroma:
-        base_cli += ["--use-aroma"]
-    if cifti:
-        base_cli += ["--cifti-output", "91k"]
-    if not reconall:
-        base_cli += ["--fs-no-reconall"]
-    if syn_sdc:
-        base_cli += ["--use-syn-sdc"]
-    if extra.strip():
-        base_cli += extra.split()
-
-    for sub in subjects:
-        label = sub[4:] if sub.startswith("sub-") else sub
-        cli = base_cli + ["--participant-label", label]
-
-        if runtime == "singularity":
-            rt_bin = "singularity" if which("singularity") else "apptainer"
-            cmd = [rt_bin, "run", "--cleanenv",
-                   "-B", f"{bids_dir}:{bids_in}:ro",
-                   "-B", f"{out_dir}:{out_in}",
-                   "-B", f"{work_dir}:{work_in}",
-                   "-B", f"{fs_license}:{fs_in}:ro"]
-            if bind_tf and os.path.isdir(tf_home):
-                cmd += ["-B", f"{tf_home}:/templateflow"]
-                # Set env var inside container
-                cmd = ["env", "SINGULARITYENV_TEMPLATEFLOW_HOME=/templateflow"] + cmd
-            cmd += [container, bids_in, out_in] + cli + ["--work-dir", work_in, "--fs-license-file", fs_in]
-            cmds.append(cmd)
-
-        elif runtime == "fmriprep-docker":
-            # Wrapper handles mounts; extra container opts not added here
-            cmd = ["fmriprep-docker", str(bids_dir), str(out_dir)] + cli + ["--work-dir", str(work_dir), "--fs-license-file", str(fs_license)]
-            cmds.append(cmd)
-
-        elif runtime == "docker":
-            cmd = ["docker", "run", "--rm",
-                   "-v", f"{bids_dir}:{bids_in}:ro",
-                   "-v", f"{out_dir}:{out_in}",
-                   "-v", f"{work_dir}:{work_in}",
-                   "-v", f"{fs_license}:{fs_in}:ro"]
-            if bind_tf and os.path.isdir(tf_home):
-                cmd += ["-v", f"{tf_home}:/templateflow", "-e", "TEMPLATEFLOW_HOME=/templateflow"]
-            cmd += [container, bids_in, out_in] + cli + ["--work-dir", work_in, "--fs-license-file", fs_in]
-            cmds.append(cmd)
-        else:
-            raise ValueError(f"Unknown runtime: {runtime}")
-    return cmds
-
-SLURM_TEMPLATE = """\
-#!/usr/bin/env bash
-#SBATCH --job-name={job_name}
-#SBATCH --partition={partition}
-#SBATCH --time={time}
-#SBATCH --cpus-per-task={cpus}
-{mem_line}#SBATCH --nodes=1
-#SBATCH --array=0-{array_max}
-#SBATCH --output={log_dir}/%x_%A_%a.out
-#SBATCH --error={log_dir}/%x_%A_%a.err
-{account}{mail}{module}
-
-set -euo pipefail
-
-BIDS_DIR="{bids}"
-OUT_DIR="{out}"
-WORK_DIR="{work}"
-FS_LICENSE="{fs_license}"
-SUBJECT_FILE="{subject_file}"
-RUNTIME="{runtime}"
-CONTAINER="{container}"
-NPROCS="{nprocs}"
-OMP="{omp}"
-MEM_MB="{mem_mb}"
-EXTRA="{extra}"
-SKIP_VAL="{skip_val}"
-OUTPUT_SPACES="{output_spaces}"
-AROMA="{aroma}"
-CIFTI="{cifti}"
-RECONALL="{reconall}"
-SYN_SDC="{syn_sdc}"
-BIND_TF="{bind_tf}"
-
-SUBS=($(grep -v '^#' "$SUBJECT_FILE" | sed '/^$/d'))
-SUB="${{SUBS[$SLURM_ARRAY_TASK_ID]}}"
-if [[ -z "$SUB" ]]; then echo "No subject at index $SLURM_ARRAY_TASK_ID"; exit 1; fi
-
-mkdir -p "$OUT_DIR" "$WORK_DIR" "{log_dir}"
-
-CLI=(participant --participant-label "${{SUB#sub-}}" --nprocs "$NPROCS" --omp-nthreads "$OMP" --mem-mb "$MEM_MB" --notrack)
-
-if [[ "$SKIP_VAL" == "1" ]]; then CLI+=(--skip-bids-validation); fi
-if [[ -n "$OUTPUT_SPACES" ]]; then CLI+=(--output-spaces $OUTPUT_SPACES); fi
-if [[ "$AROMA" == "1" ]]; then CLI+=(--use-aroma); fi
-if [[ "$CIFTI" == "1" ]]; then CLI+=(--cifti-output 91k); fi
-if [[ "$RECONALL" == "0" ]]; then CLI+=(--fs-no-reconall); fi
-if [[ "$SYN_SDC" == "1" ]]; then CLI+=(--use-syn-sdc); fi
-if [[ -n "$EXTRA" ]]; then
-  read -ra _EXTRA <<< "$EXTRA"
-  CLI+=("${{_EXTRA[@]}}")
-fi
-
-if [[ "$RUNTIME" == "singularity" ]]; then
-  RT_BIN=$(command -v singularity || command -v apptainer)
-  # Detect Apptainer vs Singularity for env var prefix
-  if [[ "$RT_BIN" == *"apptainer"* ]]; then
-    ENV_PREFIX="APPTAINERENV"
-  else
-    ENV_PREFIX="SINGULARITYENV"
-  fi
-
-  BIND_ARGS=()
-  BIND_ARGS+=(-B "$BIDS_DIR:/data:ro")
-  BIND_ARGS+=(-B "$OUT_DIR:/out")
-  BIND_ARGS+=(-B "$WORK_DIR:/work")
-  BIND_ARGS+=(-B "$FS_LICENSE:/opt/freesurfer/license.txt:ro")
-  if [[ "$BIND_TF" == "1" && -d "$HOME/.cache/templateflow" ]]; then
-    BIND_ARGS+=(-B "$HOME/.cache/templateflow:/templateflow")
-    export ${{ENV_PREFIX}}_TEMPLATEFLOW_HOME=/templateflow
-  fi
-
-  "$RT_BIN" run --cleanenv \
-    "${{BIND_ARGS[@]}}" \
-    "$CONTAINER" \
-    /data /out "${{CLI[@]}}" --work-dir /work --fs-license-file /opt/freesurfer/license.txt
-
-elif [[ "$RUNTIME" == "fmriprep-docker" ]]; then
-  fmriprep-docker "$BIDS_DIR" "$OUT_DIR" "${{CLI[@]}}" --work-dir "$WORK_DIR" --fs-license-file "$FS_LICENSE"
-
-elif [[ "$RUNTIME" == "docker" ]]; then
-  TF_ENV=""
-  TF_BIND=""
-  if [[ "$BIND_TF" == "1" ]]; then
-    if [[ -d "$HOME/.cache/templateflow" ]]; then
-      TF_BIND="-v $HOME/.cache/templateflow:/templateflow -e TEMPLATEFLOW_HOME=/templateflow"
-    fi
-  fi
-  docker run --rm \
-    -v "$BIDS_DIR:/data:ro" \
-    -v "$OUT_DIR:/out" \
-    -v "$WORK_DIR:/work" \
-    -v "$FS_LICENSE:/opt/freesurfer/license.txt:ro" \
-    $TF_BIND \
-    "$CONTAINER" \
-    /data /out "${{CLI[@]}}" --fs-license-file /opt/freesurfer/license.txt --work-dir /work
-
-else
-  echo "Unknown runtime: $RUNTIME"; exit 2
-fi
-"""
+def build_fmriprep_cmds(cfg: BuildConfig):
+    return [build_fmriprep_command(cfg, sub) for sub in cfg.subjects]
 
 # ---------------- GUI ----------------
 
@@ -539,14 +366,26 @@ class App(tk.Tk):
         out.mkdir(parents=True, exist_ok=True)
         work.mkdir(parents=True, exist_ok=True)
 
-        cfg = dict(
-            bids_dir=bids, out_dir=out, work_dir=work,
-            runtime=runtime, container=container, fs_license=fs,
-            nprocs=int(self.nprocs.get()), omp=int(self.omp.get()), mem_mb=int(self.mem_mb.get()),
-            skip_val=bool(self.skip_val.get()), output_spaces=self.output_spaces.get(),
-            aroma=bool(self.aroma.get()), cifti=bool(self.cifti.get()), reconall=bool(self.reconall.get()),
-            syn_sdc=bool(self.synsdc.get()), extra=self.extra.get(), bind_tf=bool(self.bind_tf.get()),
-            subjects=subs
+        cfg = BuildConfig(
+            bids=bids,
+            out=out,
+            work=work,
+            subjects=subs,
+            container_runtime=runtime,
+            container=container,
+            fs_license=fs,
+            templateflow_home=Path.home() / ".cache" / "templateflow" if bool(self.bind_tf.get()) else None,
+            omp_threads=int(self.omp.get()),
+            nprocs=int(self.nprocs.get()),
+            mem_mb=int(self.mem_mb.get()),
+            extra=self.extra.get(),
+            skip_bids_validation=bool(self.skip_val.get()),
+            output_spaces=self.output_spaces.get(),
+            use_aroma=bool(self.aroma.get()),
+            cifti_output=bool(self.cifti.get()),
+            fs_reconall=bool(self.reconall.get()),
+            use_syn_sdc=bool(self.synsdc.get()),
+            bind_templateflow=bool(self.bind_tf.get()),
         )
 
         if for_slurm:
@@ -570,7 +409,7 @@ class App(tk.Tk):
         cfg = self._validate_inputs()
         if not cfg:
             return
-        cmds = build_fmriprep_cmds(**cfg)
+        cmds = build_fmriprep_cmds(cfg)
         self.txt.delete("1.0", tk.END)
         for c in cmds:
             self.txt.insert(tk.END, "$ " + " ".join([str(x) for x in c]) + "\n")
@@ -579,7 +418,7 @@ class App(tk.Tk):
         cfg = self._validate_inputs()
         if not cfg:
             return
-        cmds = build_fmriprep_cmds(**cfg)
+        cmds = build_fmriprep_cmds(cfg)
         if not cmds:
             return
         script_path = filedialog.asksaveasfilename(title="Save run_fmriprep.sh", defaultextension=".sh", initialfile="run_fmriprep.sh")
@@ -587,7 +426,7 @@ class App(tk.Tk):
             return
         with open(script_path, "w") as f:
             f.write("#!/usr/bin/env bash\nset -euo pipefail\n\n")
-            f.write(f'echo "Running fMRIPrep for {len(cfg["subjects"])} subject(s)"\n')
+            f.write(f'echo "Running fMRIPrep for {len(cfg.subjects)} subject(s)"\n')
             for c in cmds:
                 f.write(" ".join([str(x) for x in c]) + "\n")
         os.chmod(script_path, 0o755)
@@ -601,57 +440,28 @@ class App(tk.Tk):
         outdir = sl["script_outdir"]
         outdir.mkdir(parents=True, exist_ok=True)
         log_dir = outdir / "logs"; log_dir.mkdir(exist_ok=True)
+        status_dir = outdir / "status"; status_dir.mkdir(exist_ok=True)
         subj_file = outdir / "subjects.txt"
-        subj_file.write_text("\n".join(cfg["subjects"]) + "\n")
+        write_subject_batches(subj_file, cfg.subjects)
 
-        account_line = f"#SBATCH --account={sl['account']}\n" if sl["account"] else ""
-        mail_line = ""
-        if sl["email"]:
-            mail_line = f"#SBATCH --mail-user={sl['email']}\n"
-            if sl["mail_type"]:
-                mail_line += f"#SBATCH --mail-type={sl['mail_type']}\n"
-        module_line = "module load singularity\n" if sl["module_sing"] and cfg["runtime"] == "singularity" else ""
-
-        # Handle memory line - omit if blank or "none"
-        mem_val = sl["mem"]
-        if mem_val and mem_val.lower() != "none":
-            mem_line = f"#SBATCH --mem={mem_val}\n"
-        else:
-            mem_line = ""
-
-        if len(cfg["subjects"]) == 0:
+        if len(cfg.subjects) == 0:
             messagebox.showerror("Error", "No subjects selected. Cannot generate SLURM script.")
             return
 
-        slurm_text = SLURM_TEMPLATE.format(
-            job_name=sl["job_name"],
+        slurm_text = create_slurm_script(
+            cfg=cfg,
+            subject_file=subj_file,
             partition=sl["partition"],
             time=sl["time"],
-            cpus=self.cpus_per_task.get(),
-            mem_line=mem_line,
-            array_max=len(cfg["subjects"]) - 1,
-            log_dir=str(log_dir),
-            account=account_line,
-            mail=mail_line,
-            module=module_line,
-            bids=str(cfg["bids_dir"]),
-            out=str(cfg["out_dir"]),
-            work=str(cfg["work_dir"]),
-            fs_license=str(cfg["fs_license"]),
-            subject_file=str(subj_file),
-            runtime=cfg["runtime"],
-            container=cfg["container"],
-            nprocs=cfg["nprocs"],
-            omp=cfg["omp"],
-            mem_mb=cfg["mem_mb"],
-            extra=cfg["extra"],
-            skip_val="1" if cfg["skip_val"] else "0",
-            output_spaces=cfg["output_spaces"],
-            aroma="1" if cfg["aroma"] else "0",
-            cifti="1" if cfg["cifti"] else "0",
-            reconall="1" if cfg["reconall"] else "0",
-            syn_sdc="1" if cfg["syn_sdc"] else "0",
-            bind_tf="1" if cfg["bind_tf"] else "0",
+            cpus_per_task=self.cpus_per_task.get(),
+            mem=sl["mem"],
+            account=sl["account"] or None,
+            email=sl["email"] or None,
+            mail_type=sl["mail_type"] or None,
+            log_dir=log_dir,
+            status_dir=status_dir,
+            module_singularity=sl["module_sing"],
+            job_name=sl["job_name"],
         )
         script_path = outdir / "fmriprep_array.sbatch"
         script_path.write_text(slurm_text)

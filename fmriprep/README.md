@@ -20,12 +20,13 @@ For most users, the recommended path is:
 2. Create a project `fmriprep.ini`.
 3. Run `fmriprep_launcher.py wizard --quick`.
 4. Use `print-cmd` or `slurm-array` directly once the config is stable.
+5. If some subjects fail, use `rerun-failed` on the generated `job_manifest.json`.
 
 ### Canonical Entry Points
 
 | File | Status | Purpose |
 |---|---|---|
-| **fmriprep_launcher.py** | Recommended | Main CLI with subcommands: `probe`, `print-cmd`, `slurm-array`, and `wizard`. Owns runtime detection, config loading, subject discovery, command generation, and SLURM script generation. |
+| **fmriprep_launcher.py** | Recommended | Main CLI with subcommands: `probe`, `print-cmd`, `slurm-array`, `rerun-failed`, and `wizard`. Owns runtime detection, config loading, subject discovery, command generation, SLURM script generation, and retry bundle generation for failed subjects. |
 | **run_fmriprep_wizard.sh** | Convenience | Wrapper that activates a likely virtualenv and launches `fmriprep_launcher.py wizard`. |
 | **fmriprep_project_example.ini** | Recommended | Project-level config example (`./fmriprep.ini`). This is the most useful config file for repeatable runs. |
 | **fmriprep_config_example.ini** | Optional | User-level config example (`~/.config/fmriprep/config.ini`). Useful for personal defaults shared across projects. |
@@ -47,10 +48,17 @@ For most users, the recommended path is:
 
 ## Quick Start
 
+All examples below use `python3 fmriprep_launcher.py ...` for explicitness. If the script is executable and on your `PATH`, direct invocation also works:
+
+```bash
+./fmriprep_launcher.py probe
+./fmriprep_launcher.py slurm-array --help
+```
+
 ### 1. Probe your environment
 
 ```bash
-python fmriprep_launcher.py probe
+python3 fmriprep_launcher.py probe
 ```
 
 Shows detected runtimes (Singularity/Docker), available container images, FreeSurfer license location, and TemplateFlow status.
@@ -74,7 +82,7 @@ cp fmriprep_project_example.ini /path/to/my_study/fmriprep.ini
 
 ```bash
 cd /path/to/my_study
-python fmriprep_launcher.py wizard --quick
+python3 fmriprep_launcher.py wizard --quick
 ```
 
 The quick wizard is the best default UX. It asks only for items that are still
@@ -83,7 +91,7 @@ missing after config/environment discovery.
 ### 4. Full interactive wizard
 
 ```bash
-python fmriprep_launcher.py wizard
+python3 fmriprep_launcher.py wizard
 ```
 
 Walks through every option with defaults from config. Install `questionary` for a better experience:
@@ -96,7 +104,7 @@ pip install --user questionary
 
 ```bash
 # Generate SLURM array script:
-python fmriprep_launcher.py slurm-array \
+python3 fmriprep_launcher.py slurm-array \
     --bids /path/to/BIDS \
     --out /path/to/BIDS/derivatives/fmriprep \
     --work /scratch/fmriprep_work \
@@ -108,13 +116,42 @@ python fmriprep_launcher.py slurm-array \
     --account rrg-mypi
 
 # Print commands without submitting:
-python fmriprep_launcher.py print-cmd \
+python3 fmriprep_launcher.py print-cmd \
     --bids /path/to/BIDS \
     --subjects sub-01 sub-02 \
     --container /path/to/fmriprep.sif \
     --fs-license /path/to/license.txt \
     --output-spaces "MNI152NLin2009cAsym:res-2 T1w"
 ```
+
+### 6. Rerun failed subjects from a previous job bundle
+
+Every `slurm-array` bundle now writes:
+
+- `fmriprep_array.sbatch`
+- `subjects.txt`
+- `job_manifest.json`
+- `status/` containing per-subject `.running`, `.ok`, and `.failed` markers
+
+To generate a new bundle containing only failed subjects:
+
+```bash
+python3 fmriprep_launcher.py rerun-failed \
+    --manifest /path/to/fmriprep_job/job_manifest.json
+```
+
+Optional overrides:
+
+```bash
+python3 fmriprep_launcher.py rerun-failed \
+    --manifest /path/to/fmriprep_job/job_manifest.json \
+    --status-dir /path/to/fmriprep_job/status \
+    --script-outdir /path/to/fmriprep_rerun \
+    --subjects-per-job 2 \
+    --job-name fmriprep_retry
+```
+
+This writes a fresh rerun bundle without mutating the original one.
 
 ## Configuration Files
 
@@ -201,7 +238,7 @@ Trillium allocates entire nodes, so `--mem` in SLURM directives causes errors. U
 
 ```bash
 # CLI:
-python fmriprep_launcher.py slurm-array ... --no-mem
+python3 fmriprep_launcher.py slurm-array ... --no-mem
 
 # Config:
 [slurm]
@@ -216,7 +253,7 @@ no_mem = true
 For large datasets, batch multiple subjects per job to reduce SLURM overhead:
 
 ```bash
-python fmriprep_launcher.py slurm-array ... --subjects-per-job 4
+python3 fmriprep_launcher.py slurm-array ... --subjects-per-job 4
 ```
 
 This creates array tasks where each runs 4 subjects in parallel via `xargs`. Resources are automatically scaled (4x nprocs, 4x memory).

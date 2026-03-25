@@ -9,7 +9,7 @@ A suite of shell scripts for submitting and managing jobs on SLURM clusters. Des
 | Script | What it does |
 |---|---|
 | **cmd_expand.sh** | Expands a parameterized command into a list of concrete commands via Cartesian product or positional zip. Pure text transformation — no SLURM dependency. |
-| **qexec.sh** | Submits a single job to SLURM: `salloc` for interactive sessions, `sbatch` for batch jobs. Handles time, memory, CPUs, array indices, logging, and OpenMP threading. |
+| **qexec.sh** | Submits a single job to SLURM: `salloc` for interactive sessions, `sbatch` for batch jobs. Handles time, memory, CPUs, array indices, logging, and OpenMP threading. The parser is now portable across BSD/macOS/Linux shells and supports both `--flag value` and `--flag=value` forms. |
 | **command_distributor.sh** | Runs inside a SLURM array task. Splits a command file into batches by `SLURM_ARRAY_TASK_ID` and executes its share via GNU Parallel. |
 | **batch_exec.sh** | Orchestrator that ties the above together: expands commands with `cmd_expand.sh`, then submits them as a SLURM array job that uses `command_distributor.sh` to distribute work across nodes. |
 
@@ -92,6 +92,18 @@ qexec.sh -i -t 4 -n 8 -m 32G
 # Allocates an interactive session with 8 CPUs, 32G RAM, 4 hours
 ```
 
+### Example: Equals-style long options
+
+```bash
+qexec.sh --dry-run --time=4 --ncpus=8 --account=mylab --array=1-10 -- myscript.sh
+```
+
+This is equivalent to:
+
+```bash
+qexec.sh --dry-run --time 4 --ncpus 8 --account mylab --array 1-10 -- myscript.sh
+```
+
 ### Example: Monitor a running job
 
 ```bash
@@ -130,7 +142,6 @@ Values inside `[]` are expanded:
 - **Python 3.7+** (used by `cmd_expand.sh` internally, and by `rjobtop.py`)
 - **GNU Parallel** (used by `command_distributor.sh` to run commands concurrently)
 - **SLURM** (the cluster must run SLURM for job submission)
-- **GNU getopt** (optional but recommended — provides robust argument parsing in `qexec.sh`; falls back to basic parsing without it)
 - **Tcl/Tk** (`wish`) — only needed for the GUI tools
 
 On most HPC clusters, Python 3, bash, and SLURM are already available. GNU Parallel may need to be loaded:

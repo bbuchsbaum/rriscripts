@@ -32,7 +32,7 @@ NCPUS=1
 NODES=1
 JOB_NAME=""
 ARRAY=""
-ACCOUNT="rrg-brad"
+ACCOUNT="${QEXEC_DEFAULT_ACCOUNT:-rrg-brad}"
 NOX11=false
 OMP_NUM_THREADS=1
 LOG_DIR="${QEXEC_LOG_DIR:-}"
@@ -73,134 +73,135 @@ usage() {
     exit 1
 }
 
-# Parse arguments
-# Detect GNU enhanced getopt reliably: it returns status 4 for `-T`
-getopt -T >/dev/null 2>&1
-GETOPT_STATUS=$?
-if [ $GETOPT_STATUS -eq 4 ]; then
-    # Use enhanced getopt for robust parsing
-    SHORT_OPTS="t:im:n:j:a:o:l:hd"
-    LONG_OPTS="time:,interactive,mem:,ncpus:,nodes:,name:,array:,account:,nox11,omp_num_threads:,log-dir:,no-mem,help,dry-run"
-    PARSED_OPTIONS=$(getopt --options $SHORT_OPTS --longoptions $LONG_OPTS --name "$0" -- "$@")
-    if [[ $? -ne 0 ]]; then
+require_value() {
+    local flag="$1"
+    if [[ $# -lt 2 || -z "${2:-}" ]]; then
+        echo "Error: ${flag} requires a value." >&2
         usage
     fi
-    eval set -- "$PARSED_OPTIONS"
+}
 
-    while true; do
-        case "$1" in
-            -t|--time)
-                TIME="$2"; shift 2 ;;
-            -i|--interactive)
-                INTERACTIVE=true; shift ;;
-            -m|--mem)
-                MEM="$2"; shift 2 ;;
-            -n|--ncpus)
-                NCPUS="$2"; shift 2 ;;
-            --nodes)
-                NODES="$2"; shift 2 ;;
-            -j|--name)
-                JOB_NAME="$2"; shift 2 ;;
-            -a|--array)
-                 if [[ "$2" =~ ^[0-9]+(-[0-9]+)?(%[0-9]+)?$ ]]; then
-                     ARRAY="$2"; shift 2
-                 else
-                     echo "Error: --array requires a valid range (e.g., 1-5 or 1-10%2)" >&2
-                     usage
-                 fi
-                 ;;
-            --account)
-                ACCOUNT="$2"; shift 2 ;;
-            --nox11)
-                NOX11=true; shift ;;
-            -o|--omp_num_threads)
-                OMP_NUM_THREADS="$2"; shift 2 ;;
-            -l|--log-dir)
-                LOG_DIR="$2"; shift 2 ;;
-            --no-mem)
-                NO_MEM=true; shift ;;
-            -d|--dry-run)
-                DRY_RUN=true; shift ;;
-            -h|--help)
-                usage ;;
-            --)
-                shift; COMMAND="$*"; break ;;
-            *)
-                echo "Internal error! Unexpected option: $1" >&2; exit 1 ;;
-        esac
-    done
-else
-    # Fallback to basic manual parsing if enhanced getopt is not available
-    echo "Warning: Enhanced getopt not found. Using basic argument parsing." >&2
-    echo "Hint: Place qexec options before the command, or use -- to separate." >&2
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -t|--time)
+            require_value "$1" "$2"
+            TIME="$2"
+            shift 2
+            ;;
+        --time=*)
+            TIME="${1#--time=}"
+            shift
+            ;;
+        -i|--interactive)
+            INTERACTIVE=true
+            shift
+            ;;
+        -m|--mem)
+            require_value "$1" "$2"
+            MEM="$2"
+            shift 2
+            ;;
+        --mem=*)
+            MEM="${1#--mem=}"
+            shift
+            ;;
+        -n|--ncpus)
+            require_value "$1" "$2"
+            NCPUS="$2"
+            shift 2
+            ;;
+        --ncpus=*)
+            NCPUS="${1#--ncpus=}"
+            shift
+            ;;
+        --nodes)
+            require_value "$1" "$2"
+            NODES="$2"
+            shift 2
+            ;;
+        --nodes=*)
+            NODES="${1#--nodes=}"
+            shift
+            ;;
+        -j|--name)
+            require_value "$1" "$2"
+            JOB_NAME="$2"
+            shift 2
+            ;;
+        --name=*)
+            JOB_NAME="${1#--name=}"
+            shift
+            ;;
+        -a|--array)
+            require_value "$1" "$2"
+            ARRAY="$2"
+            shift 2
+            ;;
+        --array=*)
+            ARRAY="${1#--array=}"
+            shift
+            ;;
+        --account)
+            require_value "$1" "$2"
+            ACCOUNT="$2"
+            shift 2
+            ;;
+        --account=*)
+            ACCOUNT="${1#--account=}"
+            shift
+            ;;
+        --nox11)
+            NOX11=true
+            shift
+            ;;
+        -o|--omp_num_threads)
+            require_value "$1" "$2"
+            OMP_NUM_THREADS="$2"
+            shift 2
+            ;;
+        --omp_num_threads=*)
+            OMP_NUM_THREADS="${1#--omp_num_threads=}"
+            shift
+            ;;
+        -l|--log-dir)
+            require_value "$1" "$2"
+            LOG_DIR="$2"
+            shift 2
+            ;;
+        --log-dir=*)
+            LOG_DIR="${1#--log-dir=}"
+            shift
+            ;;
+        --no-mem)
+            NO_MEM=true
+            shift
+            ;;
+        -d|--dry-run)
+            DRY_RUN=true
+            shift
+            ;;
+        -h|--help)
+            usage
+            ;;
+        --)
+            shift
+            COMMAND="$*"
+            break
+            ;;
+        -*)
+            echo "Error: Unknown option: $1" >&2
+            usage
+            ;;
+        *)
+            COMMAND="$*"
+            break
+            ;;
+    esac
+done
 
-    # Only collect non-qexec tokens into the command
-    CMD_TOKENS=()
-    while [[ "$#" -gt 0 ]]; do
-        case "$1" in
-            -t|--time)
-                if [[ $# -lt 2 ]]; then echo "Error: $1 requires a value" >&2; usage; fi
-                TIME="$2"; shift 2 ;;
-            -i|--interactive)
-                INTERACTIVE=true; shift ;;
-            -m|--mem)
-                if [[ $# -lt 2 ]]; then echo "Error: $1 requires a value" >&2; usage; fi
-                MEM="$2"; shift 2 ;;
-            -n|--ncpus)
-                if [[ $# -lt 2 ]]; then echo "Error: $1 requires a value" >&2; usage; fi
-                NCPUS="$2"; shift 2 ;;
-            --nodes)
-                if [[ $# -lt 2 ]]; then echo "Error: $1 requires a value" >&2; usage; fi
-                NODES="$2"; shift 2 ;;
-            -j|--name)
-                if [[ $# -lt 2 ]]; then echo "Error: $1 requires a value" >&2; usage; fi
-                JOB_NAME="$2"; shift 2 ;;
-            -a|--array)
-                if [[ $# -lt 2 ]]; then echo "Error: $1 requires a value" >&2; usage; fi
-                if [[ "$2" =~ ^[0-9]+(-[0-9]+)?(%[0-9]+)?$ ]]; then
-                    ARRAY="$2"; shift 2
-                else
-                    echo "Error: --array requires a valid range (e.g., 1-5 or 1-10%2)" >&2
-                    usage
-                fi
-                ;;
-            --array=*)
-                ARRAY_VAL="${1#--array=}"
-                if [[ "$ARRAY_VAL" =~ ^[0-9]+(-[0-9]+)?(%[0-9]+)?$ ]]; then
-                    ARRAY="$ARRAY_VAL"; shift
-                else
-                    echo "Error: --array requires a valid range (e.g., 1-5 or 1-10%2)" >&2
-                    usage
-                fi
-                ;;
-            --account)
-                if [[ $# -lt 2 ]]; then echo "Error: $1 requires a value" >&2; usage; fi
-                ACCOUNT="$2"; shift 2 ;;
-            --nox11)
-                NOX11=true; shift ;;
-            -o|--omp_num_threads)
-                if [[ $# -lt 2 ]]; then echo "Error: $1 requires a value" >&2; usage; fi
-                OMP_NUM_THREADS="$2"; shift 2 ;;
-            -l|--log-dir)
-                if [[ $# -lt 2 ]]; then echo "Error: $1 requires a value" >&2; usage; fi
-                LOG_DIR="$2"; shift 2 ;;
-            --no-mem)
-                NO_MEM=true; shift ;;
-            -d|--dry-run)
-                DRY_RUN=true; shift ;;
-            -h|--help)
-                usage ;;
-            --)
-                shift
-                # Everything after -- is the command
-                CMD_TOKENS+=("$@")
-                break ;;
-            *)
-                # Unrecognized token; part of the user's command
-                CMD_TOKENS+=("$1"); shift ;;
-        esac
-    done
-    COMMAND="${CMD_TOKENS[*]}"
+if [[ -n "$ARRAY" ]] && ! [[ "$ARRAY" =~ ^[0-9]+(-[0-9]+)?(%[0-9]+)?$ ]]; then
+    echo "Error: --array requires a valid range (e.g., 1-5 or 1-10%2)" >&2
+    usage
 fi
 
 # Validate TIME is a positive integer

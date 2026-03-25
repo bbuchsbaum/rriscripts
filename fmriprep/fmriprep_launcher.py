@@ -28,13 +28,23 @@ Environment
 """
 
 import argparse
+import json
 import os
-import subprocess
 import sys
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 
+from fmriprep_backend import (
+    BuildConfig,
+    build_fmriprep_command,
+    build_config_from_manifest,
+    build_job_manifest,
+    create_slurm_script,
+    failed_subjects_from_status_dir,
+    preflight_check,
+    resolve_subjects_arg,
+    write_subject_batches,
+)
 from fmriprep_shared import (
     default_resources_from_env,
     detect_runtime,
@@ -44,449 +54,7 @@ from fmriprep_shared import (
     load_config,
     mb_to_human,
     parse_memory_to_mb,
-    run_cmd,
-    which,
 )
-
-
-# ---------------------------- Command builder ----------------------------
-
-@dataclass
-class BuildConfig:
-    bids: Path
-    out: Path
-    work: Path
-    subjects: List[str]
-    container_runtime: str
-    container: str  # .sif path for singularity, image:tag for docker
-    fs_license: Path
-    templateflow_home: Optional[Path]  # TemplateFlow directory
-    omp_threads: int
-    nprocs: int
-    mem_mb: int
-    extra: str
-    skip_bids_validation: bool
-    output_spaces: Optional[str]
-    use_aroma: bool
-    cifti_output: bool
-    fs_reconall: bool
-    use_syn_sdc: bool
-
-def build_fmriprep_command(cfg: BuildConfig, subjects: List[str]) -> List[str]:
-    """
-    Construct the full fMRIPrep command for one or more subjects.
-    """
-    # Handle both single subject (string) and multiple subjects (list)
-    if isinstance(subjects, str):
-        subjects = [subjects]
-    
-    labels = [s.replace("sub-", "") for s in subjects]
-    base_cli = [
-        "participant",
-        "--participant-label"] + labels + [
-        "--nprocs", str(cfg.nprocs),
-        "--omp-nthreads", str(cfg.omp_threads),
-        "--mem-mb", str(cfg.mem_mb),
-        "--notrack",
-    ]
-    if cfg.skip_bids_validation:
-        base_cli += ["--skip-bids-validation"]
-    if cfg.output_spaces:
-        base_cli += ["--output-spaces"] + cfg.output_spaces.split()
-    if cfg.use_aroma:
-        import warnings
-        warnings.warn(
-            "--use-aroma was removed in fMRIPrep >= 23.1.0. "
-            "This flag will cause an error with recent fMRIPrep versions.",
-            DeprecationWarning, stacklevel=2
-        )
-        base_cli += ["--use-aroma"]
-    if cfg.cifti_output:
-        base_cli += ["--cifti-output", "91k"]
-    if not cfg.fs_reconall:
-        base_cli += ["--fs-no-reconall"]
-    if cfg.use_syn_sdc:
-        base_cli += ["--use-syn-sdc"]
-    if cfg.extra:
-        base_cli += cfg.extra.split()
-
-    bids_dir_in = "/data"
-    out_dir_in = "/out"
-    work_dir_in = "/work"
-    fs_license_in = "/opt/freesurfer/license.txt"
-
-    if cfg.container_runtime == "singularity":
-        # singularity or apptainer
-        singularity_bin = "singularity" if which("singularity") else "apptainer"
-        
-        # Handle TemplateFlow directory
-        if cfg.templateflow_home:
-            templateflow_host = str(cfg.templateflow_home)
-        else:
-            templateflow_host = os.environ.get("TEMPLATEFLOW_HOME", 
-                                              str(Path.home() / ".cache" / "templateflow"))
-        templateflow_container = "/opt/templateflow"
-        
-        cmd = [
-            singularity_bin, "run", "--cleanenv",
-            "-B", f"{cfg.bids}:{bids_dir_in}:ro",
-            "-B", f"{cfg.out}:{out_dir_in}",
-            "-B", f"{cfg.work}:{work_dir_in}",
-            "-B", f"{cfg.fs_license}:{fs_license_in}:ro",
-            "-B", f"{templateflow_host}:{templateflow_container}",
-        ]
-        
-        # Set TemplateFlow environment variable
-        cmd = ["SINGULARITYENV_TEMPLATEFLOW_HOME=" + templateflow_container] + cmd
-        
-        cmd += [
-            cfg.container,
-            bids_dir_in, out_dir_in
-        ] + base_cli + ["--work-dir", work_dir_in, "--fs-license-file", fs_license_in]
-        return cmd
-
-    if cfg.container_runtime == "fmriprep-docker":
-        # wrapper mounts paths for us
-        cmd = [
-            "fmriprep-docker",
-            str(cfg.bids), str(cfg.out),
-        ] + base_cli + ["--work-dir", str(cfg.work), "--fs-license-file", str(cfg.fs_license)]
-        return cmd
-
-    if cfg.container_runtime == "docker":
-        img = cfg.container
-        cmd = [
-            "docker", "run", "--rm",
-            "-v", f"{cfg.bids}:{bids_dir_in}:ro",
-            "-v", f"{cfg.out}:{out_dir_in}",
-            "-v", f"{cfg.work}:{work_dir_in}",
-            "-v", f"{cfg.fs_license}:{fs_license_in}:ro",
-            img,
-            bids_dir_in, out_dir_in
-        ] + base_cli + ["--work-dir", work_dir_in, "--fs-license-file", fs_license_in]
-        return cmd
-
-    raise ValueError(f"Unknown runtime: {cfg.container_runtime}")
-
-
-# ---------------------------- Slurm script generation ----------------------------
-
-SLURM_TEMPLATE = """\
-#!/usr/bin/env bash
-#
-# Auto-generated by fmriprep_launcher.py
-#
-#SBATCH --job-name={job_name}
-#SBATCH --partition={partition}
-#SBATCH --time={time}
-#SBATCH --cpus-per-task={cpus_per_task}
-{mem_line}#SBATCH --nodes=1
-#SBATCH --array=0-{array_max}
-#SBATCH --output={log_dir}/%x_%A_%a.out
-#SBATCH --error={log_dir}/%x_%A_%a.err
-{account_line}{mail_line}{module_line}
-
-set -euo pipefail
-
-# ===== User settings (auto-generated) =====
-BIDS_DIR="{bids}"
-OUT_DIR="{out}"
-WORK_DIR="{work}"
-FS_LICENSE="{fs_license}"
-SUBJECT_LIST_FILE="{subject_file}"
-RUNTIME="{runtime}"                  # singularity | fmriprep-docker | docker
-CONTAINER="{container}"              # path to .sif or docker image:tag
-OMP_THREADS="{omp_threads}"
-NPROCS="{nprocs}"
-MEM_MB="{mem_mb}"
-EXTRA_FLAGS="{extra_flags}"
-SKIP_BIDS_VAL="{skip_bids_val}"
-OUTPUT_SPACES="{output_spaces}"
-USE_AROMA="{use_aroma}"
-CIFTI="{cifti}"
-FS_RECONALL="{fs_reconall}"
-USE_SYN_SDC="{use_syn_sdc}"
-
-# ===== Derived settings =====
-# Read subject line (may contain multiple space-separated subjects if batching)
-mapfile -t SUBJECT_LINES < <(grep -v '^#' "$SUBJECT_LIST_FILE" | sed '/^$/d')
-SUBJECT_LINE="${{SUBJECT_LINES[$SLURM_ARRAY_TASK_ID]}}"
-if [[ -z "$SUBJECT_LINE" ]]; then
-  echo "No subject(s) for index $SLURM_ARRAY_TASK_ID"; exit 1;
-fi
-
-# Parse subjects from line (space-separated if batching)
-IFS=' ' read -ra SUBJECTS <<< "$SUBJECT_LINE"
-NUM_SUBJECTS=${{#SUBJECTS[@]}}
-echo "=== Processing $NUM_SUBJECTS subject(s) in this job ==="
-for SUB in "${{SUBJECTS[@]}}"; do
-  echo "  - $SUB"
-done
-
-mkdir -p "$OUT_DIR" "$WORK_DIR" "{log_dir}"
-
-# When batching, each parallel process gets the full per-subject resources
-# The SLURM job should have been allocated total_resources = per_subject × num_subjects
-if [[ $NUM_SUBJECTS -gt 1 ]]; then
-  echo "Running $NUM_SUBJECTS subjects in parallel"
-  echo "Resources per subject: $NPROCS CPUs, $MEM_MB MB memory"
-fi
-
-# Build base CLI (without participant label, will be added per subject)
-# Note: NPROCS and MEM_MB are already per-subject values from the config
-CLI_BASE=(participant --nprocs "$NPROCS" --omp-nthreads "$OMP_THREADS" --mem-mb "$MEM_MB" --notrack)
-
-if [[ "$SKIP_BIDS_VAL" == "1" ]]; then
-  CLI_BASE+=(--skip-bids-validation)
-fi
-if [[ -n "$OUTPUT_SPACES" ]]; then
-  CLI_BASE+=(--output-spaces $OUTPUT_SPACES)
-fi
-if [[ "$USE_AROMA" == "1" ]]; then
-  CLI_BASE+=(--use-aroma)
-fi
-if [[ "$CIFTI" == "1" ]]; then
-  CLI_BASE+=(--cifti-output 91k)
-fi
-if [[ "$FS_RECONALL" == "0" ]]; then
-  CLI_BASE+=(--fs-no-reconall)
-fi
-if [[ "$USE_SYN_SDC" == "1" ]]; then
-  CLI_BASE+=(--use-syn-sdc)
-fi
-if [[ -n "$EXTRA_FLAGS" ]]; then
-  read -ra _EXTRA <<< "$EXTRA_FLAGS"
-  CLI_BASE+=("${{_EXTRA[@]}}")
-fi
-
-echo "=== Running fMRIPrep on $HOSTNAME ==="
-echo "Runtime: $RUNTIME"
-echo "Container: $CONTAINER"
-echo "Subjects: ${{SUBJECTS[@]}}"
-echo "----------------------------------------------"
-
-# Setup TemplateFlow directory (use TEMPLATEFLOW_HOME if set, otherwise default)
-# Can be overridden by setting TEMPLATEFLOW_HOME environment variable
-TEMPLATEFLOW_HOST="${{TEMPLATEFLOW_HOME:-{templateflow_home}}}"
-mkdir -p "$TEMPLATEFLOW_HOST"
-echo "TemplateFlow directory: $TEMPLATEFLOW_HOST"
-
-if [[ "$RUNTIME" == "singularity" ]]; then
-  RT_BIN=$(command -v singularity || command -v apptainer)
-  
-  # Detect if using Apptainer vs Singularity for environment variable prefix
-  if [[ "$RT_BIN" == *"apptainer"* ]]; then
-    ENV_PREFIX="APPTAINERENV"
-  else
-    ENV_PREFIX="SINGULARITYENV"
-  fi
-  
-  # Export environment variables for Singularity/Apptainer
-  export ${{ENV_PREFIX}}_TEMPLATEFLOW_HOME=/opt/templateflow
-  
-  # Set additional environment variables for newer fMRIPrep versions
-  # Create directories for matplotlib and other configs
-  mkdir -p "$WORK_DIR/.matplotlib" "$WORK_DIR/.cache"
-  export ${{ENV_PREFIX}}_MPLCONFIGDIR=/work/.matplotlib
-  export ${{ENV_PREFIX}}_HOME=/work/.home
-  export ${{ENV_PREFIX}}_NUMEXPR_MAX_THREADS=$OMP_THREADS
-  
-  # Function to run fMRIPrep for a single subject
-  run_subject() {{
-    local SUBJECT_ID="${{1#sub-}}"
-    echo "Starting fMRIPrep for sub-${{SUBJECT_ID}}..."
-    
-    # Create unique work directory for this subject to avoid conflicts
-    local SUBJECT_WORK_DIR="${{WORK_DIR}}/sub-${{SUBJECT_ID}}"
-    mkdir -p "$SUBJECT_WORK_DIR"
-    
-    # Create cache directories for matplotlib and home
-    mkdir -p "$SUBJECT_WORK_DIR/.matplotlib" "$SUBJECT_WORK_DIR/.cache" "$SUBJECT_WORK_DIR/.home"
-    
-    "$RT_BIN" run --cleanenv \\
-      --home "$SUBJECT_WORK_DIR/.home" \\
-      --pwd /work \\
-      -B "$BIDS_DIR:/data:ro" \\
-      -B "$OUT_DIR:/out" \\
-      -B "$SUBJECT_WORK_DIR:/work" \\
-      -B "$FS_LICENSE:/opt/freesurfer/license.txt:ro" \\
-      -B "$TEMPLATEFLOW_HOST:/opt/templateflow" \\
-      "$CONTAINER" \\
-      /data /out ${{CLI_BASE_STR}} --participant-label "${{SUBJECT_ID}}" --work-dir /work --fs-license-file /opt/freesurfer/license.txt
-
-    local EXIT_CODE=$?
-    if [[ $EXIT_CODE -eq 0 ]]; then
-      echo "✓ Successfully completed sub-${{SUBJECT_ID}}"
-    else
-      echo "✗ Failed sub-${{SUBJECT_ID}} with exit code $EXIT_CODE"
-    fi
-    return $EXIT_CODE
-  }}
-  
-  export -f run_subject
-  export RT_BIN BIDS_DIR OUT_DIR WORK_DIR FS_LICENSE TEMPLATEFLOW_HOST CONTAINER OMP_THREADS
-  # Export CLI_BASE as a properly quoted string for subshells
-  CLI_BASE_STR=$(printf '%q ' "${{CLI_BASE[@]}}")
-  export CLI_BASE_STR
-  
-  # Run subjects in parallel
-  if [[ $NUM_SUBJECTS -gt 1 ]]; then
-    echo "Running $NUM_SUBJECTS subjects in parallel..."
-    printf '%s\\n' "${{SUBJECTS[@]}}" | xargs -P $NUM_SUBJECTS -I {{}} bash -c 'run_subject "$@"' _ {{}}
-    echo "All parallel jobs completed"
-  else
-    # Single subject - run directly
-    run_subject "${{SUBJECTS[0]}}"
-  fi
-
-elif [[ "$RUNTIME" == "fmriprep-docker" ]]; then
-  fmriprep-docker "$BIDS_DIR" "$OUT_DIR" "${{CLI_BASE[@]}}" --work-dir "$WORK_DIR" --fs-license-file "$FS_LICENSE"
-
-elif [[ "$RUNTIME" == "docker" ]]; then
-  # Function to run fMRIPrep for a single subject with Docker
-  run_subject_docker() {{
-    local SUBJECT_ID="${{1#sub-}}"
-    echo "Starting fMRIPrep for sub-${{SUBJECT_ID}} with Docker..."
-    
-    # Create unique work directory for this subject to avoid conflicts
-    local SUBJECT_WORK_DIR="${{WORK_DIR}}/sub-${{SUBJECT_ID}}"
-    mkdir -p "$SUBJECT_WORK_DIR"
-    
-    # Create cache directories for matplotlib and home
-    mkdir -p "$SUBJECT_WORK_DIR/.matplotlib" "$SUBJECT_WORK_DIR/.cache" "$SUBJECT_WORK_DIR/.home"
-    
-    docker run --rm \\
-      -e MPLCONFIGDIR=/work/.matplotlib \\
-      -e HOME=/work/.home \\
-      -e NUMEXPR_MAX_THREADS=$OMP_THREADS \\
-      -e TEMPLATEFLOW_HOME=/opt/templateflow \\
-      -v "$BIDS_DIR:/data:ro" \\
-      -v "$OUT_DIR:/out" \\
-      -v "$SUBJECT_WORK_DIR:/work" \\
-      -v "$FS_LICENSE:/opt/freesurfer/license.txt:ro" \\
-      -v "$TEMPLATEFLOW_HOST:/opt/templateflow" \\
-      "$CONTAINER" \\
-      /data /out ${{CLI_BASE_STR}} --participant-label "${{SUBJECT_ID}}" --fs-license-file /opt/freesurfer/license.txt --work-dir /work
-    
-    local EXIT_CODE=$?
-    if [[ $EXIT_CODE -eq 0 ]]; then
-      echo "✓ Successfully completed sub-${{SUBJECT_ID}}"
-    else
-      echo "✗ Failed sub-${{SUBJECT_ID}} with exit code $EXIT_CODE"
-    fi
-    return $EXIT_CODE
-  }}
-  
-  export -f run_subject_docker
-  export BIDS_DIR OUT_DIR WORK_DIR FS_LICENSE CONTAINER OMP_THREADS TEMPLATEFLOW_HOST
-  # Export CLI_BASE as a properly quoted string for subshells
-  CLI_BASE_STR=$(printf '%q ' "${{CLI_BASE[@]}}")
-  export CLI_BASE_STR
-  
-  # Run subjects in parallel
-  if [[ $NUM_SUBJECTS -gt 1 ]]; then
-    echo "Running $NUM_SUBJECTS subjects in parallel with Docker..."
-    printf '%s\\n' "${{SUBJECTS[@]}}" | xargs -P $NUM_SUBJECTS -I {{}} bash -c 'run_subject_docker "$@"' _ {{}}
-    echo "All parallel jobs completed"
-  else
-    # Single subject - run directly
-    run_subject_docker "${{SUBJECTS[0]}}"
-  fi
-
-else
-  echo "Unknown runtime: $RUNTIME" >&2; exit 2
-fi
-"""
-
-def create_slurm_script(
-    cfg: BuildConfig,
-    subject_file: Path,
-    partition: str,
-    time: str,
-    cpus_per_task: int,
-    mem: Optional[str],  # Make mem optional
-    account: Optional[str],
-    email: Optional[str],
-    mail_type: Optional[str],
-    log_dir: Path,
-    module_singularity: bool = True,
-    job_name: str = "fmriprep",
-    subjects_per_job: int = 1,  # New parameter for batching
-) -> str:
-    try:
-        n = len([l for l in subject_file.read_text().splitlines() if l.strip() and not l.strip().startswith("#")])
-    except Exception:
-        n = 0
-    if n == 0:
-        raise ValueError(f"No subjects found in {subject_file}. Cannot generate SLURM array script with zero subjects.")
-    array_max = n - 1
-
-    account_line = f"#SBATCH --account={account}\n" if account else ""
-    mail_line = ""
-    if email:
-        mail_line = f"#SBATCH --mail-user={email}\n"
-        if mail_type:
-            mail_line += f"#SBATCH --mail-type={mail_type}\n"
-    module_line = "module load singularity\n" if module_singularity and cfg.container_runtime == "singularity" else ""
-    
-    # Handle memory line - omit if mem is None or "none"
-    mem_line = ""
-    if mem and mem.lower() != "none":
-        mem_line = f"#SBATCH --mem={mem}\n"
-
-    # Use provided templateflow_home or default
-    if cfg.templateflow_home:
-        templateflow_path = str(cfg.templateflow_home)
-    else:
-        templateflow_path = "$HOME/.cache/templateflow"
-    
-    text = SLURM_TEMPLATE.format(
-        job_name=job_name,
-        partition=partition,
-        time=time,
-        cpus_per_task=cpus_per_task,
-        mem_line=mem_line,  # Use mem_line instead of mem
-        array_max=array_max,
-        log_dir=str(log_dir),
-        account_line=account_line,
-        mail_line=mail_line,
-        module_line=module_line,
-        bids=str(cfg.bids),
-        out=str(cfg.out),
-        work=str(cfg.work),
-        fs_license=str(cfg.fs_license),
-        subject_file=str(subject_file),
-        runtime=cfg.container_runtime,
-        container=cfg.container,
-        omp_threads=cfg.omp_threads,
-        nprocs=cfg.nprocs,
-        mem_mb=cfg.mem_mb,
-        extra_flags=cfg.extra,
-        skip_bids_val="1" if cfg.skip_bids_validation else "0",
-        output_spaces=cfg.output_spaces or "",
-        use_aroma="1" if cfg.use_aroma else "0",
-        cifti="1" if cfg.cifti_output else "0",
-        fs_reconall="1" if cfg.fs_reconall else "0",
-        use_syn_sdc="1" if cfg.use_syn_sdc else "0",
-        templateflow_home=templateflow_path,
-    )
-    return text
-
-
-# ---------------------------- Subject helpers ----------------------------
-
-def resolve_subjects_arg(bids: Path, subjects_arg: List[str]) -> List[str]:
-    if len(subjects_arg) == 1 and subjects_arg[0] == "all":
-        return discover_subjects(bids)
-    subs = []
-    for s in subjects_arg:
-        s = s.strip()
-        if not s:
-            continue
-        if not s.startswith("sub-"):
-            s = f"sub-{s}"
-        subs.append(s)
-    return sorted(list(dict.fromkeys(subs)))
 
 
 # ---------------------------- Argparse CLI ----------------------------
@@ -530,10 +98,11 @@ def add_common_args(p: argparse.ArgumentParser, config: Dict[str, str] = None):
     if "mem_mb" in config:
         try:
             default_mem = parse_memory_to_mb(config["mem_mb"])
-        except:
+        except (ValueError, TypeError) as e:
+            print(f"Warning: could not parse mem_mb '{config['mem_mb']}': {e}", file=sys.stderr)
             default_mem = int(config["mem_mb"])
     p.add_argument("--mem-mb", type=parse_memory_to_mb, default=default_mem,
-                   help=help_with_default("--mem-mb (supports units: 32G, 760000M)", "mem_mb", "~90% of available"))
+                   help=help_with_default("--mem-mb (supports units: 32G, 760000M)", "mem_mb", "about 90 percent of available"))
     p.add_argument("--skip-bids-validation", action="store_true", 
                    default=config.get("skip_bids_validation", "").lower() == "true", 
                    help=help_with_default("Pass --skip-bids-validation", "skip_bids_validation"))
@@ -657,6 +226,11 @@ def cmd_print(args):
         output_spaces=args.output_spaces, use_aroma=args.use_aroma, cifti_output=args.cifti_output,
         fs_reconall=args.fs_reconall, use_syn_sdc=args.use_syn_sdc
     )
+    errors = preflight_check(cfg)
+    if errors:
+        for e in errors:
+            print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
     for sub in subjects:
         cmd = build_fmriprep_command(cfg, sub)
         print("$ " + " ".join([str(c) for c in cmd]))
@@ -695,17 +269,17 @@ def cmd_slurm_array(args):
         output_spaces=args.output_spaces, use_aroma=args.use_aroma, cifti_output=args.cifti_output,
         fs_reconall=args.fs_reconall, use_syn_sdc=args.use_syn_sdc
     )
+    errors = preflight_check(cfg)
+    if errors:
+        for e in errors:
+            print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
     out_dir = args.script_outdir.expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Create subject batches
-    batches = []
-    for i in range(0, len(subjects), subjects_per_job):
-        batch = subjects[i:i + subjects_per_job]
-        batches.append(" ".join(batch))  # Space-separated subjects per line
-    
     subj_file = out_dir / "subjects.txt"
-    subj_file.write_text("\n".join(batches) + "\n")
+    batches = write_subject_batches(subj_file, subjects, subjects_per_job)
     
     if subjects_per_job > 1:
         print(f"Created {len(batches)} job batches from {len(subjects)} subjects")
@@ -716,6 +290,8 @@ def cmd_slurm_array(args):
     else:
         log_dir = out_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
+    status_dir = out_dir / "status"
+    status_dir.mkdir(parents=True, exist_ok=True)
 
     # Handle memory specification
     if args.no_mem:
@@ -736,16 +312,107 @@ def cmd_slurm_array(args):
         email=args.email,
         mail_type=args.mail_type,
         log_dir=log_dir,
+        status_dir=status_dir,
         module_singularity=args.module_singularity,
         job_name=args.job_name,
-        subjects_per_job=subjects_per_job
+    )
+    script_path = out_dir / "fmriprep_array.sbatch"
+    script_path.write_text(text)
+    os.chmod(script_path, 0o755)
+    manifest_path = out_dir / "job_manifest.json"
+    manifest = build_job_manifest(
+        cfg,
+        script_outdir=out_dir,
+        subject_file=subj_file,
+        status_dir=status_dir,
+        log_dir=log_dir,
+        partition=args.partition,
+        time=args.time,
+        cpus_per_task=args.cpus_per_task or adjusted_nprocs,
+        mem=mem_spec,
+        account=args.account,
+        email=args.email,
+        mail_type=args.mail_type,
+        job_name=args.job_name,
+        module_singularity=args.module_singularity,
+        subjects_per_job=subjects_per_job,
+    )
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    print(f"\nWrote Slurm script: {script_path}")
+    print(f"Wrote subject list: {subj_file}")
+    print(f"Wrote manifest: {manifest_path}")
+    print("\nSubmit with:")
+    print(f"  sbatch {script_path}")
+
+
+def cmd_rerun_failed(args):
+    manifest_path = args.manifest.expanduser().resolve()
+    manifest = json.loads(manifest_path.read_text())
+    status_dir = args.status_dir.expanduser().resolve() if args.status_dir else Path(manifest["job_bundle"]["status_dir"]).expanduser().resolve()
+    failed_subjects = failed_subjects_from_status_dir(status_dir)
+
+    if not failed_subjects:
+        print(f"No failed subjects found in {status_dir}")
+        return
+
+    cfg = build_config_from_manifest(manifest, failed_subjects)
+    slurm = manifest["slurm"]
+    subjects_per_job = args.subjects_per_job or int(slurm.get("subjects_per_job", 1))
+    out_dir = args.script_outdir.expanduser().resolve() if args.script_outdir else manifest_path.parent / "rerun_failed_job"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    subj_file = out_dir / "subjects.txt"
+    batches = write_subject_batches(subj_file, failed_subjects, subjects_per_job)
+    log_dir = out_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    rerun_status_dir = out_dir / "status"
+    rerun_status_dir.mkdir(parents=True, exist_ok=True)
+
+    text = create_slurm_script(
+        cfg=cfg,
+        subject_file=subj_file,
+        partition=slurm["partition"],
+        time=slurm["time"],
+        cpus_per_task=int(slurm["cpus_per_task"]),
+        mem=slurm.get("mem"),
+        account=slurm.get("account"),
+        email=slurm.get("email"),
+        mail_type=slurm.get("mail_type"),
+        log_dir=log_dir,
+        status_dir=rerun_status_dir,
+        module_singularity=bool(slurm.get("module_singularity", False)),
+        job_name=args.job_name or f'{slurm["job_name"]}_rerun',
     )
     script_path = out_dir / "fmriprep_array.sbatch"
     script_path.write_text(text)
     os.chmod(script_path, 0o755)
 
-    print(f"\nWrote Slurm script: {script_path}")
+    rerun_manifest = build_job_manifest(
+        cfg,
+        script_outdir=out_dir,
+        subject_file=subj_file,
+        status_dir=rerun_status_dir,
+        log_dir=log_dir,
+        partition=slurm["partition"],
+        time=slurm["time"],
+        cpus_per_task=int(slurm["cpus_per_task"]),
+        mem=slurm.get("mem"),
+        account=slurm.get("account"),
+        email=slurm.get("email"),
+        mail_type=slurm.get("mail_type"),
+        job_name=args.job_name or f'{slurm["job_name"]}_rerun',
+        module_singularity=bool(slurm.get("module_singularity", False)),
+        subjects_per_job=subjects_per_job,
+    )
+    rerun_manifest_path = out_dir / "job_manifest.json"
+    rerun_manifest_path.write_text(json.dumps(rerun_manifest, indent=2) + "\n")
+
+    print(f"Found {len(failed_subjects)} failed subject(s) in {status_dir}")
+    print(f"Created {len(batches)} rerun batch(es)")
+    print(f"Wrote Slurm script: {script_path}")
     print(f"Wrote subject list: {subj_file}")
+    print(f"Wrote manifest: {rerun_manifest_path}")
     print("\nSubmit with:")
     print(f"  sbatch {script_path}")
 
@@ -825,7 +492,7 @@ def cmd_wizard_quick(args, config):
             try:
                 start, end = sel_input.split('-')
                 selected_subjects = subs[int(start)-1:int(end)]
-            except:
+            except (ValueError, IndexError):
                 print("Invalid range, using all.")
                 selected_subjects = subs
         else:
@@ -848,7 +515,8 @@ def cmd_wizard_quick(args, config):
         try:
             runtime = detect_runtime("auto")
             print(f"Auto-detected runtime: {runtime}")
-        except:
+        except (FileNotFoundError, RuntimeError, OSError) as e:
+            print(f"Runtime auto-detection failed: {e}", file=sys.stderr)
             runtime = ask("Runtime?", choices=["singularity", "fmriprep-docker", "docker"])
 
     container = config.get('container', 'auto')
@@ -927,7 +595,7 @@ def cmd_wizard_quick(args, config):
         outdir.mkdir(parents=True, exist_ok=True)
 
         subj_file = outdir / "subjects.txt"
-        subj_file.write_text("\n".join(selected_subjects) + "\n")
+        write_subject_batches(subj_file, selected_subjects)
 
         partition = config.get('slurm_partition', os.environ.get("SLURM_JOB_PARTITION", "compute"))
         time = config.get('slurm_time', "24:00:00")
@@ -1116,7 +784,7 @@ def cmd_wizard(args):
             if not subjects:
                 print("Invalid range, using all")
                 subjects = ["all"]
-        except:
+        except (ValueError, IndexError):
             print("Invalid range format, using all")
             subjects = ["all"]
 
@@ -1208,7 +876,8 @@ def cmd_wizard(args):
                   default=config.get('mem_mb', str(mem_auto)))
     try:
         mem_mb = parse_memory_to_mb(mem_str)
-    except:
+    except (ValueError, TypeError) as e:
+        print(f"Warning: could not parse memory '{mem_str}': {e}", file=sys.stderr)
         mem_mb = int(mem_str)
 
     # fMRIPrep flags
@@ -1264,13 +933,8 @@ def cmd_wizard(args):
         subjects_per_job = int(ask("Subjects per job (1=one job per subject, >1=batch multiple)", default="1"))
         
         # Create subject batch file
-        batches = []
-        for i in range(0, len(selected_subjects), subjects_per_job):
-            batch = selected_subjects[i:i + subjects_per_job]
-            batches.append(" ".join(batch))  # Space-separated subjects per line
-        
         subj_file = outdir / "subjects.txt"
-        subj_file.write_text("\n".join(batches) + "\n")
+        batches = write_subject_batches(subj_file, selected_subjects, subjects_per_job)
         
         if subjects_per_job > 1:
             print(f"Will batch {subjects_per_job} subjects per job")
@@ -1315,7 +979,7 @@ def cmd_wizard(args):
             cfg=cfg, subject_file=subj_file, partition=partition, time=time,
             cpus_per_task=cpus_per_task, mem=mem, account=account, email=email,
             mail_type=mail_type, log_dir=log_dir, module_singularity=module_singularity,
-            job_name=job_name, subjects_per_job=subjects_per_job
+            job_name=job_name
         )
         script_path = outdir / "fmriprep_array.sbatch"
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -1419,6 +1083,15 @@ Environment Variables:
                         help="Number of subjects to process per job (default: 1). "
                              "Values >1 batch multiple subjects together, reducing total jobs but requiring more resources per job.")
     p_slurm.set_defaults(func=cmd_slurm_array)
+
+    # rerun-failed
+    p_rerun = sub.add_parser("rerun-failed", help="Generate a new Slurm bundle for subjects marked failed in a previous job")
+    p_rerun.add_argument("--manifest", type=Path, required=True, help="Path to a prior job_manifest.json")
+    p_rerun.add_argument("--status-dir", type=Path, default=None, help="Override the status directory instead of using the one from the manifest")
+    p_rerun.add_argument("--script-outdir", type=Path, default=None, help="Where to write the rerun bundle (default: <manifest dir>/rerun_failed_job)")
+    p_rerun.add_argument("--subjects-per-job", type=int, default=None, help="Override batching for the rerun bundle")
+    p_rerun.add_argument("--job-name", default=None, help="Override the rerun Slurm job name")
+    p_rerun.set_defaults(func=cmd_rerun_failed)
 
     # wizard
     p_wiz = sub.add_parser("wizard", help="Interactive setup (questionary if available, else basic prompts)")
