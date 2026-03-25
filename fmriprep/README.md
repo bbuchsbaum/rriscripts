@@ -334,6 +334,27 @@ This creates array tasks where each runs 4 subjects in parallel via `xargs`. Res
 | `FS_LICENSE` | Path to FreeSurfer license file (fallback if not in config). |
 | `TEMPLATEFLOW_HOME` | Path to TemplateFlow cache directory. |
 
+## Installation
+
+Download all fmriprep launcher scripts to `~/bin` in one command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bbuchsbaum/rriscripts/main/fmriprep/install.sh | bash
+```
+
+To install to a different directory:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bbuchsbaum/rriscripts/main/fmriprep/install.sh | bash -s -- --prefix /opt/bin
+```
+
+Or clone the repo and add to your PATH:
+
+```bash
+git clone https://github.com/bbuchsbaum/rriscripts.git
+export PATH="$HOME/code/rriscripts/fmriprep:$PATH"
+```
+
 ## Requirements
 
 - **Python 3.7+**

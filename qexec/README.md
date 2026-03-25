@@ -163,9 +163,23 @@ On most HPC clusters, Python 3, bash, and SLURM are already available. GNU Paral
 module load parallel    # cluster-specific; check 'module avail'
 ```
 
-### Setup
+### Quick Install
 
-1. **Clone or copy the scripts:**
+Download all qexec scripts to `~/bin` in one command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bbuchsbaum/rriscripts/main/qexec/install.sh | bash
+```
+
+To install to a different directory:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bbuchsbaum/rriscripts/main/qexec/install.sh | bash -s -- --prefix /opt/bin
+```
+
+### Manual Setup
+
+1. **Clone the repo:**
 
    ```bash
    git clone https://github.com/bbuchsbaum/rriscripts.git
@@ -177,23 +191,7 @@ module load parallel    # cluster-specific; check 'module avail'
    export PATH="$HOME/code/rriscripts/qexec:$PATH"
    ```
 
-   Or symlink into a directory already on your PATH:
-
-   ```bash
-   mkdir -p ~/bin
-   for f in qexec.sh cmd_expand.sh batch_exec.sh command_distributor.sh \
-            bexec.sh send_slurm.sh rjobtop.py slurm_job_monitor.sh; do
-       ln -sf "$HOME/code/rriscripts/qexec/$f" ~/bin/
-   done
-   ```
-
-3. **Make scripts executable** (if not already):
-
-   ```bash
-   chmod +x ~/code/rriscripts/qexec/*.sh ~/code/rriscripts/qexec/*.py
-   ```
-
-4. **Verify:**
+3. **Verify:**
 
    ```bash
    qexec.sh --help

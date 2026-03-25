@@ -22,7 +22,7 @@ See the full **[qexec README](qexec/README.md)** for usage examples, the expansi
 
 Tools for building and submitting [fMRIPrep](https://fmriprep.org) preprocessing jobs:
 
-- **fmriprep_launcher.py** — one-stop CLI with `probe`, `print-cmd`, `slurm-array`, `rerun-failed`, and `wizard` subcommands. Auto-detects runtimes and containers. Supports Singularity/Apptainer, fmriprep-docker, and Docker.
+- **fmriprep_launcher.py** — one-stop CLI with `init`, `probe`, `print-cmd`, `slurm-array`, `rerun-failed`, and `wizard` subcommands. Auto-detects runtimes and containers. Supports Singularity/Apptainer, fmriprep-docker, and Docker.
 - **Express wizard** (`wizard --quick`) — only asks 3-5 questions when a project config file is present; derives everything else from config/env
 - **fmriprep_gui_tk.py** / **fmriprep_tui_autocomplete.py** — graphical (Tk) and terminal (Textual) UI front-ends
 - **TemplateFlow support** — automatically binds and validates TemplateFlow caches for air-gapped compute nodes
@@ -35,6 +35,24 @@ See the full **[fMRIPrep README](fmriprep/README.md)** for usage examples, confi
 
 - **xnat_cli.R** — an R CLI for [XNAT](https://www.xnat.org/) repositories. List projects, subjects, experiments, and scans; download files for individual subjects or entire projects. Built on the `xnatR` package.
 
+## Quick Install
+
+Each sub-project can be installed independently to `~/bin`:
+
+```bash
+# SLURM job submission toolkit
+curl -fsSL https://raw.githubusercontent.com/bbuchsbaum/rriscripts/main/qexec/install.sh | bash
+
+# fMRIPrep launcher
+curl -fsSL https://raw.githubusercontent.com/bbuchsbaum/rriscripts/main/fmriprep/install.sh | bash
+```
+
+To install to a different directory, append `-- --prefix /your/dir`. Or clone the whole repo:
+
+```bash
+git clone https://github.com/bbuchsbaum/rriscripts.git
+```
+
 ## Requirements
 
 - **bash** 4.0+, **Python 3.7+**
@@ -43,7 +61,7 @@ See the full **[fMRIPrep README](fmriprep/README.md)** for usage examples, confi
 - **R** (for `xnat_cli.R`)
 - **Tcl/Tk** (`wish`) — only for the GUI tools
 
-Most of these are already available on typical HPC clusters. See the [qexec README](qexec/README.md#installation) for detailed installation steps.
+Most of these are already available on typical HPC clusters.
 
 ## License
 
