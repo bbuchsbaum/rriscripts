@@ -369,24 +369,66 @@ def cmd_init(args):
 
 def cmd_probe(_args):
     print("=== Probe ===")
+
+    # --- Config files ---
+    config_search_paths = [
+        Path("/etc/fmriprep/config.ini"),
+        Path.home() / ".config" / "fmriprep" / "config.ini",
+        Path.home() / ".fmriprep.ini",
+        Path.cwd() / "fmriprep.ini",
+    ]
+    found_configs = [p for p in config_search_paths if p.exists()]
+    if found_configs:
+        print("Config files (in load order):")
+        for p in found_configs:
+            print(f"  - {p}")
+    else:
+        print("No config files found")
+
+    cfg = load_config()
+    if cfg:
+        print("Effective config values:")
+        for k, v in sorted(cfg.items()):
+            print(f"  {k} = {v}")
+
+    # --- Runtime ---
     try:
         rt = detect_runtime("auto")
         print(f"Runtime: {rt}")
     except Exception as e:
         print(f"Runtime: not found ({e})")
 
+    # --- Container from config ---
+    container_cfg = cfg.get("container", "").strip()
+    if container_cfg and container_cfg != "auto":
+        cp = Path(container_cfg).expanduser()
+        if cp.is_file():
+            print(f"Container (from config): {cp}")
+        elif cp.is_dir():
+            imgs = discover_sif_images(str(cp))
+            if imgs:
+                print(f"Container dir (from config): {cp}")
+                for p in imgs:
+                    print(f"  - {p.name}")
+            else:
+                print(f"Container dir (from config): {cp}  [no .sif/.simg found]")
+        else:
+            print(f"Container (from config): {container_cfg}  [NOT FOUND]")
+
+    # --- FMRIPREP_SIF_DIR ---
     sif_dir = os.environ.get("FMRIPREP_SIF_DIR")
     if sif_dir:
         imgs = discover_sif_images(sif_dir)
         if imgs:
-            print(f"SIF images in {sif_dir}:")
+            print(f"SIF images in $FMRIPREP_SIF_DIR ({sif_dir}):")
             for p in imgs:
                 print(f"  - {p.name}")
         else:
-            print(f"No fMRIPrep images found in {sif_dir}")
-    else:
-        print("FMRIPREP_SIF_DIR not set")
+            print(f"No fMRIPrep images found in $FMRIPREP_SIF_DIR ({sif_dir})")
+    elif not container_cfg:
+        print("No container configured (set 'container' in config or $FMRIPREP_SIF_DIR)")
 
+    # --- Docker ---
     docker_imgs = docker_list_fmriprep_images()
     if docker_imgs:
         print("Docker images:")
