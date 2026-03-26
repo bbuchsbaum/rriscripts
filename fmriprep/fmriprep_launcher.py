@@ -1252,13 +1252,13 @@ def cmd_wizard(args):
     # Load config for defaults
     config = load_config([args.config] if hasattr(args, 'config') and args.config else [])
 
-    # Review mode: show all settings at once, edit by number
-    if getattr(args, 'review', False):
-        return cmd_wizard_review(args, config)
-
     # Quick mode: express wizard with minimal questions
     if getattr(args, 'quick', False):
         return cmd_wizard_quick(args, config)
+
+    # Default: review mode (unless --classic explicitly requested)
+    if not getattr(args, 'classic', False):
+        return cmd_wizard_review(args, config)
 
     # Optional interactive flow; Questionary if available, else text input.
     try:
@@ -1735,8 +1735,8 @@ Environment variables: FMRIPREP_SIF_DIR, FS_LICENSE, TEMPLATEFLOW_HOME
     p_wiz = sub.add_parser("wizard", help="Interactive setup (questionary if available, else basic prompts)")
     p_wiz.add_argument("--quick", action="store_true",
                        help="Express mode: only ask essential questions, derive everything else from config/env/defaults")
-    p_wiz.add_argument("--review", action="store_true",
-                       help="Review & Go: auto-detect everything, show summary table, edit by number")
+    p_wiz.add_argument("--classic", action="store_true",
+                       help="Use the old sequential Q&A wizard (requires questionary for best experience)")
     p_wiz.set_defaults(func=cmd_wizard)
 
     args = ap.parse_args()
