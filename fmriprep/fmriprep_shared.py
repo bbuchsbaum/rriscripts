@@ -37,7 +37,7 @@ def load_config(config_paths: List[str] | None = None) -> Dict[str, str]:
         Path.cwd() / "fmriprep.ini",
     ]
 
-    config = configparser.ConfigParser()
+    config = configparser.ConfigParser(inline_comment_prefixes=('#',))
     defaults: Dict[str, str] = {}
 
     for path in default_paths + [Path(p) for p in config_paths]:

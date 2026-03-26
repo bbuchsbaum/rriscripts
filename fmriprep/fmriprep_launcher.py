@@ -790,7 +790,13 @@ def cmd_wizard_review(args, config):
     email = config.get('slurm_email', '')
     mail_type = config.get('slurm_mail_type', '')
     no_mem = config.get('slurm_no_mem', config.get('no_mem', 'false')).lower().startswith('true')
-    log_dir = config.get('slurm_log_dir', '')
+    if 'slurm_log_dir' in config:
+        log_dir = config['slurm_log_dir']
+    elif no_mem:
+        # Trillium: /project is read-only on compute nodes
+        log_dir = f"/scratch/{os.environ.get('USER', 'user')}/slurm_logs"
+    else:
+        log_dir = ''
 
     # --- Phase 2: Build mutable field table ---
     # (key, label, value, type, choices)
@@ -816,7 +822,7 @@ def cmd_wizard_review(args, config):
         ('fs_reconall',       'FreeSurfer recon-all',   str(fs_reconall).lower(),   'bool',     None),
         ('use_syn_sdc',       'SyN SDC',               str(use_syn_sdc).lower(),   'bool',     None),
         ('extra',             'Extra flags',            extra,                      'str',      None),
-        # SLURM 17-23
+        # SLURM 17-24
         ('partition',         'SLURM partition',       partition,                  'str',      None),
         ('time_limit',        'SLURM walltime',        time_limit,                 'str',      None),
         ('account',           'SLURM account',         account,                    'str',      None),
@@ -824,6 +830,7 @@ def cmd_wizard_review(args, config):
         ('email',             'Notification email',    email,                      'str',      None),
         ('mail_type',         'Mail type',             mail_type,                  'str',      None),
         ('no_mem',            'Omit SLURM --mem',      str(no_mem).lower(),        'bool',     None),
+        ('log_dir',           'Log directory',         log_dir,                    'dir',      None),
     ]
 
     def fval(key):
@@ -1009,10 +1016,7 @@ def cmd_wizard_review(args, config):
         subj_file = outdir / "subjects.txt"
         write_subject_batches(subj_file, subjects)
 
-        slurm_log = Path(fval('log_dir') or str(outdir / "logs")).expanduser() if fval('log_dir') else outdir / "logs"
-        # Use the SLURM log_dir from the field if the user set slurm_log_dir in config
-        log_dir_cfg = config.get('slurm_log_dir', '')
-        slurm_log = Path(log_dir_cfg).expanduser() if log_dir_cfg else outdir / "logs"
+        slurm_log = Path(fval('log_dir')).expanduser() if fval('log_dir') else outdir / "logs"
         slurm_log.mkdir(parents=True, exist_ok=True)
 
         status_dir = outdir / "status"
@@ -1224,8 +1228,12 @@ def cmd_wizard_quick(args, config):
         email = config.get('slurm_email') or None
         mail_type = config.get('slurm_mail_type') or None
         job_name = config.get('slurm_job_name', "fmriprep")
-        log_dir = Path(config.get('slurm_log_dir', str(outdir / "logs"))).expanduser()
-        no_mem = config.get('no_mem', 'false').lower() == 'true'
+        no_mem = config.get('slurm_no_mem', config.get('no_mem', 'false')).lower() == 'true'
+        default_log = str(outdir / "logs")
+        if 'slurm_log_dir' not in config and no_mem:
+            # Trillium: /project is read-only on compute nodes, use /scratch
+            default_log = f"/scratch/{os.environ.get('USER', 'user')}/slurm_logs"
+        log_dir = Path(config.get('slurm_log_dir', default_log)).expanduser()
         mem = None if no_mem else config.get('slurm_mem', mb_to_human(mem_mb))
         module_sing = runtime == "singularity"
 
