@@ -790,13 +790,7 @@ def cmd_wizard_review(args, config):
     email = config.get('slurm_email', '')
     mail_type = config.get('slurm_mail_type', '')
     no_mem = config.get('slurm_no_mem', config.get('no_mem', 'false')).lower().startswith('true')
-    if 'slurm_log_dir' in config:
-        log_dir = config['slurm_log_dir']
-    elif no_mem:
-        # Trillium: /project is read-only on compute nodes
-        log_dir = f"/scratch/{os.environ.get('USER', 'user')}/slurm_logs"
-    else:
-        log_dir = ''
+    log_dir = config.get('slurm_log_dir', '')
 
     # --- Phase 2: Build mutable field table ---
     # (key, label, value, type, choices)
@@ -1229,11 +1223,7 @@ def cmd_wizard_quick(args, config):
         mail_type = config.get('slurm_mail_type') or None
         job_name = config.get('slurm_job_name', "fmriprep")
         no_mem = config.get('slurm_no_mem', config.get('no_mem', 'false')).lower() == 'true'
-        default_log = str(outdir / "logs")
-        if 'slurm_log_dir' not in config and no_mem:
-            # Trillium: /project is read-only on compute nodes, use /scratch
-            default_log = f"/scratch/{os.environ.get('USER', 'user')}/slurm_logs"
-        log_dir = Path(config.get('slurm_log_dir', default_log)).expanduser()
+        log_dir = Path(config.get('slurm_log_dir', str(outdir / "logs"))).expanduser()
         mem = None if no_mem else config.get('slurm_mem', mb_to_human(mem_mb))
         module_sing = runtime == "singularity"
 
