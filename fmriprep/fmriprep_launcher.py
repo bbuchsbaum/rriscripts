@@ -665,6 +665,398 @@ def _validate_templateflow(tf_path: Path):
         print(f"✓ TemplateFlow: {len(subdirs)} template(s) found in {tf_path}")
 
 
+# -------------------- Review wizard helpers --------------------
+
+def _format_subjects(subjects, all_subjects):
+    """Compact subject display string."""
+    if not subjects:
+        return "(none detected)"
+    if subjects == all_subjects:
+        return f"all ({len(subjects)} subjects)"
+    if len(subjects) <= 4:
+        return f"{', '.join(subjects)} ({len(subjects)} of {len(all_subjects)})"
+    return f"{subjects[0]}, ..., {subjects[-1]} ({len(subjects)} of {len(all_subjects)})"
+
+
+def _print_review_table(fields):
+    """Print numbered summary table with section headers."""
+    groups = {0: "Paths", 4: "Container & Environment", 8: "Resources",
+              11: "fMRIPrep Flags", 17: "SLURM Settings"}
+    w = 70
+    print(f"\n{'=' * w}")
+    print("  fMRIPrep Configuration Review")
+    print(f"{'=' * w}")
+    for i, (key, label, value, ftype, _) in enumerate(fields):
+        if i in groups:
+            print(f"\n  --- {groups[i]} ---")
+        marker = " "
+        if ftype in ('dir', 'file') and value and not Path(value).expanduser().exists():
+            marker = "!"
+        if key in ('bids', 'container', 'fs_license') and not value:
+            marker = "!"
+        if key == 'subjects' and '(none' in value:
+            marker = "!"
+        # truncate long paths for display
+        if len(value) > 48:
+            display = "..." + value[-(48-3):]
+        else:
+            display = value
+        print(f"  {marker}{i+1:>2}. {label:<24s} {display}")
+    print(f"\n{'-' * w}")
+
+
+def cmd_wizard_review(args, config):
+    """Review & Go wizard: auto-detect everything, show summary, edit by number."""
+
+    # --- Phase 1: Resolve all defaults silently ---
+
+    # BIDS directory
+    bids_str = config.get('bids', '')
+    if bids_str:
+        bids = Path(bids_str).expanduser().resolve()
+    else:
+        bids = Path.cwd()
+    # If CWD doesn't look like BIDS, prompt once
+    if not bids.is_dir() or not any(p.name.startswith('sub-') for p in bids.iterdir() if p.is_dir()):
+        raw = input(f"BIDS directory [{bids}]: ").strip()
+        if raw:
+            bids = Path(raw).expanduser().resolve()
+
+    out = Path(config.get('out', str(bids / "derivatives" / "fmriprep"))).expanduser().resolve()
+    work = Path(config.get('work', str(bids / "work_fmriprep"))).expanduser().resolve()
+
+    # Subjects
+    all_subjects = discover_subjects(bids) if bids.is_dir() else []
+    cfg_subs = config.get('subjects', '').strip()
+    if cfg_subs and cfg_subs.lower() != 'all':
+        try:
+            subjects = resolve_subjects_arg(bids, cfg_subs.split())
+        except Exception:
+            subjects = all_subjects
+    else:
+        subjects = all_subjects
+
+    # Runtime + container
+    runtime_cfg = config.get('runtime', 'auto')
+    try:
+        runtime = detect_runtime(runtime_cfg)
+    except RuntimeError:
+        runtime = 'singularity'
+
+    container_cfg = config.get('container', 'auto')
+    container = ''
+    if container_cfg and container_cfg != 'auto':
+        cp = Path(container_cfg).expanduser()
+        if cp.is_file():
+            container = str(cp)
+        elif cp.is_dir():
+            imgs = discover_sif_images(str(cp))
+            container = str(sorted(imgs, key=lambda p: p.stat().st_mtime, reverse=True)[0]) if imgs else ''
+    if not container:
+        try:
+            container = choose_container(runtime, 'auto')
+        except RuntimeError:
+            container = ''
+
+    # FreeSurfer license
+    fs_str = config.get('fs_license', os.environ.get('FS_LICENSE', ''))
+    fs_license = str(Path(fs_str).expanduser()) if fs_str else ''
+
+    # TemplateFlow
+    tf_str = config.get('templateflow_home',
+                        os.environ.get('TEMPLATEFLOW_HOME',
+                                       str(Path.home() / ".cache" / "templateflow")))
+    templateflow_home = str(Path(tf_str).expanduser())
+
+    # Resources
+    cpus_auto, mem_auto = default_resources_from_env()
+    nprocs = int(config.get('nprocs', str(cpus_auto)))
+    omp_threads = int(config.get('omp_threads', str(min(8, nprocs))))
+    mem_mb = parse_memory_to_mb(config['mem_mb']) if 'mem_mb' in config else mem_auto
+
+    # fMRIPrep flags
+    output_spaces = config.get('output_spaces', 'MNI152NLin2009cAsym:res-2 T1w')
+    skip_bids = config.get('skip_bids_validation', 'true').lower() == 'true'
+    cifti_output = config.get('cifti_output', 'false').lower() == 'true'
+    fs_reconall = config.get('fs_reconall', 'true').lower() == 'true'
+    use_syn_sdc = config.get('use_syn_sdc', 'false').lower() == 'true'
+    extra = config.get('extra', '')
+
+    # SLURM
+    partition = config.get('slurm_partition', 'compute')
+    time_limit = config.get('slurm_time', '24:00:00')
+    account = config.get('slurm_account', '')
+    job_name = config.get('slurm_job_name', 'fmriprep')
+    email = config.get('slurm_email', '')
+    mail_type = config.get('slurm_mail_type', '')
+    no_mem = config.get('slurm_no_mem', config.get('no_mem', 'false')).lower().startswith('true')
+    log_dir = config.get('slurm_log_dir', '')
+
+    # --- Phase 2: Build mutable field table ---
+    # (key, label, value, type, choices)
+    fields = [
+        # Paths 0-3
+        ('bids',              'BIDS directory',        str(bids),                  'dir',      None),
+        ('out',               'Output directory',      str(out),                   'dir',      None),
+        ('work',              'Work directory',         str(work),                  'dir',      None),
+        ('subjects',          'Subjects',              _format_subjects(subjects, all_subjects), 'subjects', None),
+        # Container 4-7
+        ('runtime',           'Container runtime',     runtime,                    'choice',   ['singularity','docker','fmriprep-docker']),
+        ('container',         'Container image',       container,                  'file',     None),
+        ('fs_license',        'FS license',            fs_license,                 'file',     None),
+        ('templateflow_home', 'TemplateFlow dir',      templateflow_home,          'dir',      None),
+        # Resources 8-10
+        ('nprocs',            'nprocs',                str(nprocs),                'int',      None),
+        ('omp_threads',       'omp-nthreads',          str(omp_threads),           'int',      None),
+        ('mem_mb',            'mem-mb',                str(mem_mb),                'int',      None),
+        # Flags 11-16
+        ('output_spaces',     'Output spaces',         output_spaces,              'str',      None),
+        ('skip_bids',         'Skip BIDS validation',  str(skip_bids).lower(),     'bool',     None),
+        ('cifti_output',      'CIFTI output 91k',      str(cifti_output).lower(),  'bool',     None),
+        ('fs_reconall',       'FreeSurfer recon-all',   str(fs_reconall).lower(),   'bool',     None),
+        ('use_syn_sdc',       'SyN SDC',               str(use_syn_sdc).lower(),   'bool',     None),
+        ('extra',             'Extra flags',            extra,                      'str',      None),
+        # SLURM 17-23
+        ('partition',         'SLURM partition',       partition,                  'str',      None),
+        ('time_limit',        'SLURM walltime',        time_limit,                 'str',      None),
+        ('account',           'SLURM account',         account,                    'str',      None),
+        ('job_name',          'SLURM job name',        job_name,                   'str',      None),
+        ('email',             'Notification email',    email,                      'str',      None),
+        ('mail_type',         'Mail type',             mail_type,                  'str',      None),
+        ('no_mem',            'Omit SLURM --mem',      str(no_mem).lower(),        'bool',     None),
+    ]
+
+    def fval(key):
+        for k, _, v, _, _ in fields:
+            if k == key:
+                return v
+        return ''
+
+    def fset(key, new_val):
+        for i, (k, label, _, ftype, choices) in enumerate(fields):
+            if k == key:
+                fields[i] = (k, label, new_val, ftype, choices)
+                return
+
+    # --- Phase 3: Display + edit loop ---
+    while True:
+        _print_review_table(fields)
+
+        # Flag critical missing values
+        missing = []
+        for i, (key, label, value, ftype, _) in enumerate(fields):
+            if key == 'bids' and (not value or not Path(value).expanduser().is_dir()):
+                missing.append(f"  {i+1}. {label}")
+            elif key == 'container' and not value:
+                missing.append(f"  {i+1}. {label}")
+            elif key == 'fs_license' and (not value or not Path(value).expanduser().exists()):
+                missing.append(f"  {i+1}. {label}")
+            elif key == 'subjects' and '(none' in value:
+                missing.append(f"  {i+1}. {label}")
+        if missing:
+            print("  [!] Needs attention:")
+            for m in missing:
+                print(f"      {m}")
+
+        raw = input("\n  Edit field numbers (e.g. '5 9'), or Enter to proceed: ").strip()
+        if not raw:
+            break
+
+        try:
+            nums = [int(x) for x in raw.split()]
+        except ValueError:
+            print("  Enter field numbers separated by spaces.")
+            continue
+
+        for num in nums:
+            if num < 1 or num > len(fields):
+                print(f"  {num} is out of range (1-{len(fields)}).")
+                continue
+            idx = num - 1
+            key, label, old_val, ftype, choices = fields[idx]
+
+            if ftype == 'bool':
+                new_val = 'false' if old_val == 'true' else 'true'
+                print(f"  {label}: {old_val} -> {new_val}")
+            elif ftype == 'choice':
+                print(f"  {label}:")
+                for ci, c in enumerate(choices, 1):
+                    star = " *" if c == old_val else ""
+                    print(f"    {ci}. {c}{star}")
+                ch = input(f"  Choice (1-{len(choices)}) [{old_val}]: ").strip()
+                if ch.isdigit() and 1 <= int(ch) <= len(choices):
+                    new_val = choices[int(ch) - 1]
+                else:
+                    new_val = old_val
+            elif ftype == 'dir':
+                new_val = input(f"  {label} [{old_val}]: ").strip() or old_val
+            elif ftype == 'file':
+                new_val = input(f"  {label} [{old_val}]: ").strip() or old_val
+                p = Path(new_val).expanduser()
+                if p.is_dir():
+                    imgs = discover_sif_images(str(p))
+                    if imgs:
+                        print(f"  Found {len(imgs)} image(s):")
+                        for ci, img in enumerate(imgs, 1):
+                            print(f"    {ci}. {img.name}")
+                        ch = input(f"  Pick (1-{len(imgs)}): ").strip()
+                        if ch.isdigit() and 1 <= int(ch) <= len(imgs):
+                            new_val = str(imgs[int(ch) - 1])
+                elif not p.exists():
+                    print(f"  Warning: {new_val} does not exist")
+            elif ftype == 'int':
+                v = input(f"  {label} [{old_val}]: ").strip() or old_val
+                try:
+                    new_val = str(int(v))
+                except ValueError:
+                    print(f"  Invalid integer, keeping {old_val}")
+                    new_val = old_val
+            elif ftype == 'subjects':
+                print(f"  Available: {len(all_subjects)} subjects")
+                print("  Enter: 'all', space-separated sub-IDs, or range '1-10'")
+                v = input("  Subjects [all]: ").strip() or "all"
+                if v.lower() == 'all':
+                    subjects = all_subjects
+                elif '-' in v and not v.startswith('sub-'):
+                    try:
+                        start, end = v.split('-', 1)
+                        subjects = all_subjects[int(start)-1:int(end)]
+                    except (ValueError, IndexError):
+                        print("  Invalid range, keeping all.")
+                        subjects = all_subjects
+                else:
+                    sel = []
+                    for tok in v.split():
+                        if tok.isdigit():
+                            idx2 = int(tok) - 1
+                            if 0 <= idx2 < len(all_subjects):
+                                sel.append(all_subjects[idx2])
+                        else:
+                            t = tok if tok.startswith('sub-') else f'sub-{tok}'
+                            if t in all_subjects:
+                                sel.append(t)
+                    subjects = sel if sel else all_subjects
+                new_val = _format_subjects(subjects, all_subjects)
+            else:  # str
+                new_val = input(f"  {label} [{old_val}]: ").strip() or old_val
+
+            fields[idx] = (key, label, new_val, ftype, choices)
+
+            # Cascade: bids change -> re-discover subjects
+            if key == 'bids':
+                new_bids = Path(new_val).expanduser().resolve()
+                if new_bids.is_dir():
+                    all_subjects = discover_subjects(new_bids)
+                    subjects = all_subjects
+                    fset('subjects', _format_subjects(subjects, all_subjects))
+                    # update default out
+                    fset('out', str(new_bids / "derivatives" / "fmriprep"))
+
+    # --- Phase 4: Build config, preview, generate ---
+    final_bids = Path(fval('bids')).expanduser().resolve()
+    final_out = Path(fval('out')).expanduser().resolve()
+    final_work = Path(fval('work')).expanduser().resolve()
+    final_fs = Path(fval('fs_license')).expanduser().resolve() if fval('fs_license') else Path('')
+    final_tf = Path(fval('templateflow_home')).expanduser() if fval('templateflow_home') else None
+
+    if not subjects:
+        print("Error: no subjects selected.", file=sys.stderr)
+        sys.exit(1)
+
+    cfg = BuildConfig(
+        bids=final_bids, out=final_out, work=final_work,
+        subjects=subjects,
+        container_runtime=fval('runtime'),
+        container=fval('container'),
+        fs_license=final_fs,
+        templateflow_home=final_tf,
+        omp_threads=int(fval('omp_threads')),
+        nprocs=int(fval('nprocs')),
+        mem_mb=int(fval('mem_mb')),
+        extra=fval('extra'),
+        skip_bids_validation=fval('skip_bids') == 'true',
+        output_spaces=fval('output_spaces') or None,
+        use_aroma=False,
+        cifti_output=fval('cifti_output') == 'true',
+        fs_reconall=fval('fs_reconall') == 'true',
+        use_syn_sdc=fval('use_syn_sdc') == 'true',
+    )
+
+    errors = preflight_check(cfg)
+    if errors:
+        print("\nPreflight issues:")
+        for e in errors:
+            print(f"  - {e}")
+        if input("Continue anyway? (y/N): ").strip().lower() != 'y':
+            sys.exit(1)
+
+    if final_tf and final_tf.exists():
+        _validate_templateflow(final_tf)
+
+    # Preview
+    preview_cmd = build_fmriprep_command(cfg, subjects[0])
+    print(f"\nExample command ({subjects[0]}):")
+    print(f"$ {' '.join(str(c) for c in preview_cmd)}")
+
+    # SLURM generation
+    gen = input("\nGenerate SLURM array script? (Y/n): ").strip().lower()
+    if gen in ('', 'y', 'yes'):
+        outdir = Path(config.get('slurm_script_outdir', str(Path.cwd() / "fmriprep_job"))).expanduser()
+        outdir.mkdir(parents=True, exist_ok=True)
+        final_out.mkdir(parents=True, exist_ok=True)
+        final_work.mkdir(parents=True, exist_ok=True)
+
+        subj_file = outdir / "subjects.txt"
+        write_subject_batches(subj_file, subjects)
+
+        slurm_log = Path(fval('log_dir') or str(outdir / "logs")).expanduser() if fval('log_dir') else outdir / "logs"
+        # Use the SLURM log_dir from the field if the user set slurm_log_dir in config
+        log_dir_cfg = config.get('slurm_log_dir', '')
+        slurm_log = Path(log_dir_cfg).expanduser() if log_dir_cfg else outdir / "logs"
+        slurm_log.mkdir(parents=True, exist_ok=True)
+
+        status_dir = outdir / "status"
+        status_dir.mkdir(parents=True, exist_ok=True)
+
+        cpus_per_task = int(fval('nprocs'))
+        omit_mem = fval('no_mem') == 'true'
+        mem = None if omit_mem else mb_to_human(int(fval('mem_mb')))
+        module_sing = fval('runtime') == 'singularity'
+
+        script_text = create_slurm_script(
+            cfg=cfg, subject_file=subj_file,
+            partition=fval('partition'), time=fval('time_limit'),
+            cpus_per_task=cpus_per_task, mem=mem,
+            account=fval('account') or None, email=fval('email') or None,
+            mail_type=fval('mail_type') or None,
+            log_dir=slurm_log, status_dir=status_dir,
+            module_singularity=module_sing, job_name=fval('job_name'),
+        )
+        script_path = outdir / "fmriprep_array.sbatch"
+        script_path.write_text(script_text)
+        os.chmod(script_path, 0o755)
+
+        manifest = build_job_manifest(
+            cfg, script_outdir=outdir, subject_file=subj_file,
+            status_dir=status_dir, log_dir=slurm_log,
+            partition=fval('partition'), time=fval('time_limit'),
+            cpus_per_task=cpus_per_task, mem=mem,
+            account=fval('account') or None, email=fval('email') or None,
+            mail_type=fval('mail_type') or None,
+            job_name=fval('job_name'), module_singularity=module_sing,
+            subjects_per_job=1,
+        )
+        manifest_path = outdir / "job_manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+        print(f"\nWrote SLURM script:  {script_path}")
+        print(f"Wrote subject list:  {subj_file}")
+        print(f"Wrote manifest:      {manifest_path}")
+        print(f"\nSubmit with:\n  sbatch {script_path}")
+
+    print("\nDone!")
+
+
 def cmd_wizard_quick(args, config):
     """Express wizard: only ask essentials, derive everything else from config/env."""
 
@@ -859,6 +1251,10 @@ def cmd_wizard_quick(args, config):
 def cmd_wizard(args):
     # Load config for defaults
     config = load_config([args.config] if hasattr(args, 'config') and args.config else [])
+
+    # Review mode: show all settings at once, edit by number
+    if getattr(args, 'review', False):
+        return cmd_wizard_review(args, config)
 
     # Quick mode: express wizard with minimal questions
     if getattr(args, 'quick', False):
@@ -1339,6 +1735,8 @@ Environment variables: FMRIPREP_SIF_DIR, FS_LICENSE, TEMPLATEFLOW_HOME
     p_wiz = sub.add_parser("wizard", help="Interactive setup (questionary if available, else basic prompts)")
     p_wiz.add_argument("--quick", action="store_true",
                        help="Express mode: only ask essential questions, derive everything else from config/env/defaults")
+    p_wiz.add_argument("--review", action="store_true",
+                       help="Review & Go: auto-detect everything, show summary table, edit by number")
     p_wiz.set_defaults(func=cmd_wizard)
 
     args = ap.parse_args()
