@@ -818,11 +818,20 @@ class FMRIPrepAutocompleteTUI(App):
             progress.update(progress=100)
             
             if result.returncode == 0:
-                self.update_status("✅ Script generated successfully! Check fmriprep_job/")
+                # Show output in status and notify
+                output = result.stdout.strip()
+                # Extract key file paths from output
+                lines = [l.strip() for l in output.splitlines() if l.strip()]
+                summary = " | ".join(lines[-3:]) if len(lines) >= 3 else output
+                self.update_status(f"✅ {summary}")
+                self.notify(output or "Script generated successfully!", title="Done", timeout=10)
             else:
-                self.update_status(f"❌ Error: {result.stderr[:100]}")
+                err = result.stderr.strip() or result.stdout.strip()
+                self.update_status(f"❌ {err[:200]}")
+                self.notify(err[:500], title="Error", severity="error", timeout=15)
         except Exception as e:
-            self.update_status(f"❌ Error: {str(e)[:100]}")
+            self.update_status(f"❌ {e}")
+            self.notify(str(e), title="Error", severity="error", timeout=10)
         finally:
             progress.display = False
     
