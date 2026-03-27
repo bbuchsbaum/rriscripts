@@ -1748,7 +1748,7 @@ Environment variables: FMRIPREP_SIF_DIR, FS_LICENSE, TEMPLATEFLOW_HOME
     p_slurm.add_argument("--partition", default=config.get("slurm_partition", "compute"))
     p_slurm.add_argument("--time", default=config.get("slurm_time", "24:00:00"), help="Walltime, e.g. 24:00:00")
     p_slurm.add_argument("--cpus-per-task", type=int, 
-                        default=int(config["slurm_cpus_per_task"]) if "slurm_cpus_per_task" in config else None)
+                        default=int(config["slurm_cpus_per_task"]) if config.get("slurm_cpus_per_task", "").strip() else None)
     p_slurm.add_argument("--mem", default=config.get("slurm_mem"), 
                         help="Slurm memory request (e.g. 32G). Default: based on mem-mb. Use 'none' to omit --mem")
     p_slurm.add_argument("--account", default=config.get("slurm_account"))
