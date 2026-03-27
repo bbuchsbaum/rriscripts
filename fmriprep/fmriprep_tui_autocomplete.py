@@ -202,6 +202,16 @@ class FMRIPrepAutocompleteTUI(App):
         text-style: italic;
         height: 1;
     }
+
+    Horizontal > Switch {
+        width: 12;
+        height: 3;
+    }
+
+    Horizontal > Label {
+        margin: 1 0 0 1;
+        height: 1;
+    }
     """
     
     BINDINGS = [
