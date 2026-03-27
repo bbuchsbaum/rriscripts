@@ -1646,8 +1646,9 @@ def cmd_gui(_args):
         import tkinter  # noqa: F401
     except ImportError:
         print("Tkinter is not available in this Python installation.\n"
-              "On Debian/Ubuntu: sudo apt install python3-tk\n"
-              "On CentOS/RHEL: sudo yum install python3-tkinter", file=sys.stderr)
+              "On HPC clusters, try loading a different Python module:\n"
+              "  module load python/3.11  (or similar)\n"
+              "Or use the TUI instead:  fmriprep_launcher.py tui", file=sys.stderr)
         sys.exit(1)
     if not os.environ.get("DISPLAY"):
         print("No DISPLAY set. The Tk GUI needs X11 forwarding.\n"
