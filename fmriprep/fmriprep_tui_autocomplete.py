@@ -207,15 +207,15 @@ class FMRIPrepAutocompleteTUI(App):
         height: auto;
     }
 
-    Switch {
-        width: 12;
-    }
-
-    Horizontal:has(Switch) {
+    .switch-row {
         height: 3;
     }
 
-    Horizontal:has(Switch) > Label {
+    .switch-row Switch {
+        width: 12;
+    }
+
+    .switch-row Label {
         margin: 1 0 0 1;
     }
     """
@@ -375,23 +375,28 @@ class FMRIPrepAutocompleteTUI(App):
             with Vertical(id="fmriprep_flags"):
                 yield Horizontal(
                     Switch(id="skip_bids", value=_cfgbool('skip_bids_validation', True)),
-                    Label("Skip BIDS Validation (faster)")
+                    Label("Skip BIDS Validation (faster)"),
+                    classes="switch-row",
                 )
                 yield Horizontal(
                     Switch(id="use_aroma", value=_cfgbool('use_aroma')),
-                    Label("Use ICA-AROMA denoising")
+                    Label("Use ICA-AROMA denoising"),
+                    classes="switch-row",
                 )
                 yield Horizontal(
                     Switch(id="cifti_output", value=_cfgbool('cifti_output')),
-                    Label("Generate CIFTI outputs (91k)")
+                    Label("Generate CIFTI outputs (91k)"),
+                    classes="switch-row",
                 )
                 yield Horizontal(
                     Switch(id="fs_reconall", value=_cfgbool('fs_reconall')),
-                    Label("Run FreeSurfer recon-all")
+                    Label("Run FreeSurfer recon-all"),
+                    classes="switch-row",
                 )
                 yield Horizontal(
                     Switch(id="use_syn_sdc", value=_cfgbool('use_syn_sdc')),
-                    Label("Use SyN SDC for fieldmap-less correction")
+                    Label("Use SyN SDC for fieldmap-less correction"),
+                    classes="switch-row",
                 )
             
             yield Label("Output Spaces (space-separated):")
@@ -409,7 +414,8 @@ class FMRIPrepAutocompleteTUI(App):
             
             yield Horizontal(
                 Switch(id="use_slurm", value=True),
-                Label("Generate SLURM Script")
+                Label("Generate SLURM Script"),
+                classes="switch-row",
             )
             
             yield Rule()
@@ -468,7 +474,8 @@ class FMRIPrepAutocompleteTUI(App):
             
             yield Horizontal(
                 Switch(id="no_mem", value=self.config.get('slurm_no_mem', 'false').lower() == 'true'),
-                Label("No memory specification (whole-node clusters)")
+                Label("No memory specification (whole-node clusters)"),
+                classes="switch-row",
             )
             
             yield Rule()
@@ -504,7 +511,8 @@ class FMRIPrepAutocompleteTUI(App):
             
             yield Horizontal(
                 Switch(id="module_singularity", value=False),
-                Label("Add 'module load singularity' to script")
+                Label("Add 'module load singularity' to script"),
+                classes="switch-row",
             )
     
     def _compose_subjects_tab(self) -> ComposeResult:
