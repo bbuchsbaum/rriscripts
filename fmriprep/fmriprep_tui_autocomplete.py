@@ -203,14 +203,20 @@ class FMRIPrepAutocompleteTUI(App):
         height: 1;
     }
 
-    Horizontal > Switch {
+    #fmriprep_flags {
+        height: auto;
+    }
+
+    Switch {
         width: 12;
+    }
+
+    Horizontal:has(Switch) {
         height: 3;
     }
 
-    Horizontal > Label {
+    Horizontal:has(Switch) > Label {
         margin: 1 0 0 1;
-        height: 1;
     }
     """
     
@@ -363,25 +369,28 @@ class FMRIPrepAutocompleteTUI(App):
             yield Rule()
             yield Static("fMRIPrep Options", classes="section-title")
             
-            with Vertical():
+            def _cfgbool(key, default=False):
+                return self.config.get(key, str(default)).lower() == 'true'
+
+            with Vertical(id="fmriprep_flags"):
                 yield Horizontal(
-                    Switch(id="skip_bids", value=True),
+                    Switch(id="skip_bids", value=_cfgbool('skip_bids_validation', True)),
                     Label("Skip BIDS Validation (faster)")
                 )
                 yield Horizontal(
-                    Switch(id="use_aroma", value=False),
+                    Switch(id="use_aroma", value=_cfgbool('use_aroma')),
                     Label("Use ICA-AROMA denoising")
                 )
                 yield Horizontal(
-                    Switch(id="cifti_output", value=False),
+                    Switch(id="cifti_output", value=_cfgbool('cifti_output')),
                     Label("Generate CIFTI outputs (91k)")
                 )
                 yield Horizontal(
-                    Switch(id="fs_reconall", value=False),
+                    Switch(id="fs_reconall", value=_cfgbool('fs_reconall')),
                     Label("Run FreeSurfer recon-all")
                 )
                 yield Horizontal(
-                    Switch(id="use_syn_sdc", value=False),
+                    Switch(id="use_syn_sdc", value=_cfgbool('use_syn_sdc')),
                     Label("Use SyN SDC for fieldmap-less correction")
                 )
             
@@ -458,8 +467,8 @@ class FMRIPrepAutocompleteTUI(App):
             )
             
             yield Horizontal(
-                Switch(id="no_mem", value=False),
-                Label("No memory specification (some clusters)")
+                Switch(id="no_mem", value=self.config.get('slurm_no_mem', 'false').lower() == 'true'),
+                Label("No memory specification (whole-node clusters)")
             )
             
             yield Rule()
@@ -539,10 +548,13 @@ class FMRIPrepAutocompleteTUI(App):
                 yield Button("Quit", variant="error", id="quit")
     
     def on_mount(self) -> None:
-        """Initialize the data table when mounted"""
+        """Initialize the data table and auto-scan for subjects"""
         table = self.query_one("#subject_table", DataTable)
         table.add_columns("✓", "Subject ID", "Status")
         table.cursor_type = "row"
+        # Auto-scan BIDS directory and select all subjects
+        self.scan_for_subjects()
+        self.select_all_subjects()
     
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button presses"""
