@@ -562,7 +562,6 @@ class FMRIPrepAutocompleteTUI(App):
         table.cursor_type = "row"
         # Auto-scan BIDS directory and select all subjects
         self.scan_for_subjects()
-        self.select_all_subjects()
     
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button presses"""
@@ -595,15 +594,12 @@ class FMRIPrepAutocompleteTUI(App):
     
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Handle subject selection in data table"""
-        table = self.query_one("#subject_table", DataTable)
-        row_key = event.row_key
-        
-        if row_key in self.selected_subjects:
-            self.selected_subjects.remove(row_key)
-            table.update_cell(row_key, "✓", "")
+        subject = str(event.row_key.value)
+        if subject in self.selected_subjects:
+            self.selected_subjects.remove(subject)
         else:
-            self.selected_subjects.add(row_key)
-            table.update_cell(row_key, "✓", "✓")
+            self.selected_subjects.add(subject)
+        self._rebuild_subject_table()
     
     def scan_for_subjects(self) -> None:
         """Scan BIDS directory for subjects"""
@@ -619,9 +615,10 @@ class FMRIPrepAutocompleteTUI(App):
             
             if self.subjects:
                 for subject in self.subjects:
-                    table.add_row("", subject, "Ready", key=subject)
-                
-                self.update_status(f"✅ Found {len(self.subjects)} subjects")
+                    table.add_row("✓", subject, "Ready", key=subject)
+                    self.selected_subjects.add(subject)
+
+                self.update_status(f"✅ Found {len(self.subjects)} subjects (all selected)")
             else:
                 self.update_status("❌ No subjects found")
         else:
@@ -653,19 +650,23 @@ class FMRIPrepAutocompleteTUI(App):
             else:
                 self.update_status("ℹ️ No containers found, will use 'auto' to download")
     
+    def _rebuild_subject_table(self) -> None:
+        """Rebuild the subject table reflecting current selections."""
+        table = self.query_one("#subject_table", DataTable)
+        table.clear()
+        for subject in self.subjects:
+            mark = "✓" if subject in self.selected_subjects else ""
+            table.add_row(mark, subject, "Ready", key=subject)
+
     def select_all_subjects(self) -> None:
         """Select all subjects"""
-        table = self.query_one("#subject_table", DataTable)
-        for subject in self.subjects:
-            self.selected_subjects.add(subject)
-            table.update_cell(subject, "✓", "✓")
-    
+        self.selected_subjects = set(self.subjects)
+        self._rebuild_subject_table()
+
     def select_no_subjects(self) -> None:
         """Deselect all subjects"""
-        table = self.query_one("#subject_table", DataTable)
         self.selected_subjects.clear()
-        for subject in self.subjects:
-            table.update_cell(subject, "✓", "")
+        self._rebuild_subject_table()
     
     def apply_preset(self, preset: str) -> None:
         """Apply a resource preset"""
