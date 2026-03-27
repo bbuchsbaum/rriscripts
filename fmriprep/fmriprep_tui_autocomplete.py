@@ -269,7 +269,7 @@ class FMRIPrepAutocompleteTUI(App):
             
             yield Label("Output Directory:")
             yield PathInput(
-                value=self.config.get('out', ''),
+                value=self.config.get('out', str(Path.cwd() / "derivatives" / "fmriprep")),
                 placeholder="/path/to/output",
                 id="out_dir"
             )
