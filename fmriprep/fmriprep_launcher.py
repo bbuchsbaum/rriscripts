@@ -1756,8 +1756,12 @@ Environment variables: FMRIPREP_SIF_DIR, FS_LICENSE, TEMPLATEFLOW_HOME
     p_slurm.add_argument("--mail-type", default=config.get("slurm_mail_type"))
     p_slurm.add_argument("--job-name", default=config.get("slurm_job_name", "fmriprep"))
     p_slurm.add_argument("--module-singularity", action="store_true", help="Insert 'module load singularity' in script")
-    p_slurm.add_argument("--log-dir", type=Path, default=None, help="Override log directory (default: script-outdir/logs)")
-    p_slurm.add_argument("--no-mem", action="store_true", help="Omit --mem specification (for Trillium cluster)")
+    p_slurm.add_argument("--log-dir", type=Path,
+                        default=Path(config["slurm_log_dir"]) if "slurm_log_dir" in config else None,
+                        help="Override log directory (default: script-outdir/logs)")
+    p_slurm.add_argument("--no-mem", action="store_true",
+                        default=config.get("slurm_no_mem", config.get("no_mem", "false")).lower() == "true",
+                        help="Omit --mem specification (for whole-node clusters)")
     p_slurm.add_argument("--subjects-per-job", type=int, default=1, 
                         help="Number of subjects to process per job (default: 1). "
                              "Values >1 batch multiple subjects together, reducing total jobs but requiring more resources per job.")
