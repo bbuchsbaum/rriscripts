@@ -1616,6 +1616,48 @@ def cmd_wizard(args):
         print(f"\nWrote Slurm script: {script_path}\nSubmit with:\n  sbatch {script_path}")
 
 
+# -------------------- UI launcher commands --------------------
+
+def _find_sibling_script(name: str) -> Path:
+    """Locate a script in the same directory as this launcher."""
+    here = Path(__file__).resolve().parent
+    path = here / name
+    if path.exists():
+        return path
+    raise SystemExit(f"Cannot find {name} (expected at {path})")
+
+
+def cmd_tui(_args):
+    """Launch the Textual terminal UI."""
+    try:
+        import textual  # noqa: F401
+    except ImportError:
+        print("The Textual TUI requires the 'textual' package.\n"
+              "Install it with:\n  pip install textual\n"
+              "Then re-run:  fmriprep_launcher.py tui", file=sys.stderr)
+        sys.exit(1)
+    script = _find_sibling_script("fmriprep_tui_autocomplete.py")
+    os.execv(sys.executable, [sys.executable, str(script)])
+
+
+def cmd_gui(_args):
+    """Launch the Tkinter graphical UI."""
+    try:
+        import tkinter  # noqa: F401
+    except ImportError:
+        print("Tkinter is not available in this Python installation.\n"
+              "On Debian/Ubuntu: sudo apt install python3-tk\n"
+              "On CentOS/RHEL: sudo yum install python3-tkinter", file=sys.stderr)
+        sys.exit(1)
+    if not os.environ.get("DISPLAY"):
+        print("No DISPLAY set. The Tk GUI needs X11 forwarding.\n"
+              "Connect with:  ssh -X user@cluster\n"
+              "Or use the TUI instead:  fmriprep_launcher.py tui", file=sys.stderr)
+        sys.exit(1)
+    script = _find_sibling_script("fmriprep_gui_tk.py")
+    os.execv(sys.executable, [sys.executable, str(script)])
+
+
 # ---------------------------- Main ----------------------------
 
 def main():
@@ -1736,6 +1778,14 @@ Environment variables: FMRIPREP_SIF_DIR, FS_LICENSE, TEMPLATEFLOW_HOME
     p_wiz.add_argument("--classic", action="store_true",
                        help="Use the old sequential Q&A wizard (requires questionary for best experience)")
     p_wiz.set_defaults(func=cmd_wizard)
+
+    # tui
+    p_tui = sub.add_parser("tui", help="Textual terminal UI with tabs and path completion (requires: pip install textual)")
+    p_tui.set_defaults(func=cmd_tui)
+
+    # gui
+    p_gui = sub.add_parser("gui", help="Tkinter graphical UI (requires X11/display)")
+    p_gui.set_defaults(func=cmd_gui)
 
     args = ap.parse_args()
     args.func(args)
