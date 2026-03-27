@@ -230,6 +230,7 @@ class FMRIPrepAutocompleteTUI(App):
     
     def __init__(self):
         super().__init__()
+        self._user_cwd = os.getcwd()
         self.config = load_config()
         self.subjects = []
         self.selected_subjects = set()
@@ -743,7 +744,7 @@ class FMRIPrepAutocompleteTUI(App):
         
         # Build command
         cmd = [
-            "python", "fmriprep_launcher.py",
+            sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "fmriprep_launcher.py"),
             "slurm-array" if use_slurm else "print-cmd",
             "--bids", bids_dir,
             "--out", out_dir,
@@ -808,11 +809,16 @@ class FMRIPrepAutocompleteTUI(App):
         
         # Execute
         try:
+            # Run in user's original CWD, but ensure launcher can find sibling modules
+            lib_dir = os.path.dirname(os.path.abspath(__file__))
+            env = os.environ.copy()
+            env["PYTHONPATH"] = lib_dir + os.pathsep + env.get("PYTHONPATH", "")
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                cwd=os.path.dirname(os.path.abspath(__file__))
+                cwd=self._user_cwd,
+                env=env,
             )
             
             progress.update(progress=100)
@@ -870,10 +876,11 @@ job_name = {self.query_one("#job_name", Input).value}
 log_dir = {self.query_one("#log_dir", PathInput).value}
 module_singularity = {str(self.query_one("#module_singularity", Switch).value).lower()}
 """
-        with open("fmriprep.ini", "w") as f:
+        config_path = os.path.join(self._user_cwd, "fmriprep.ini")
+        with open(config_path, "w") as f:
             f.write(config_content)
-        
-        self.update_status("✅ Configuration saved to fmriprep.ini")
+
+        self.update_status(f"✅ Configuration saved to {config_path}")
     
     def load_configuration(self) -> None:
         """Reload configuration from file"""
