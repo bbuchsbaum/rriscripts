@@ -261,7 +261,7 @@ class FMRIPrepAutocompleteTUI(App):
             
             yield Label("BIDS Directory:")
             yield PathInput(
-                value=self.config.get('bids', ''),
+                value=self.config.get('bids', str(Path.cwd())),
                 placeholder="/path/to/bids",
                 id="bids_dir"
             )
