@@ -1,68 +1,142 @@
 # rriscripts
 
-Scripts and tools for neuroimaging research on SLURM-based HPC clusters. Built for day-to-day use at [RRI](https://research.baycrest.org/rotman) but designed to be portable to any SLURM environment.
+Tools for neuroimaging and SLURM-based HPC workflows. The repository currently
+has three main parts:
 
-## Contents
+- [`qexec/`](qexec/) for general SLURM job submission, command expansion, and job monitoring
+- [`fmriprep/`](fmriprep/) for building and submitting fMRIPrep jobs
+- [`xnat_cli/`](xnat_cli/) for working with XNAT from R
 
-### [`qexec/`](qexec/) — SLURM Job Submission Toolkit
+## Install
 
-A complete pipeline for parameterized batch job submission on SLURM clusters:
+Most users only need one of the two installable toolkits below.
 
-- **cmd_expand.sh** — expand parameterized commands via Cartesian product or positional zip (ranges, file lists, CSV columns, globs)
-- **qexec.sh** — submit single interactive (`salloc`) or batch (`sbatch`) jobs with a clean option interface
-- **batch_exec.sh** — orchestrator that expands commands and distributes them across a SLURM array job via GNU Parallel
-- **command_distributor.sh** — splits a command file by array task ID and runs each batch in parallel
-- **rjobtop.py** — live CPU/memory monitoring for running SLURM jobs (great for R/future/callr workloads)
-- **Tcl/Tk GUIs** for both `qexec.sh` and `batch_exec.sh` with tooltips, output preview, and input validation
-- **Haskell implementations** of the core scripts for compiled-binary deployments
+### Install `qexec`
 
-See the full **[qexec README](qexec/README.md)** for usage examples, the expansion syntax reference, installation instructions, and how the scripts compose together.
-
-### [`fmriprep/`](fmriprep/) — fMRIPrep Launcher
-
-Tools for building and submitting [fMRIPrep](https://fmriprep.org) preprocessing jobs:
-
-- **fmriprep_launcher.py** — one-stop CLI with `init`, `probe`, `print-cmd`, `slurm-array`, `rerun-failed`, and `wizard` subcommands. Auto-detects runtimes and containers. Supports Singularity/Apptainer, fmriprep-docker, and Docker.
-- **Express wizard** (`wizard --quick`) — only asks 3-5 questions when a project config file is present; derives everything else from config/env
-- **fmriprep_gui_tk.py** / **fmriprep_tui_autocomplete.py** — graphical (Tk) and terminal (Textual) UI front-ends
-- **TemplateFlow support** — automatically binds and validates TemplateFlow caches for air-gapped compute nodes
-- **Retry support** — generated job bundles include `job_manifest.json` plus per-subject `status/` markers so failed subjects can be resubmitted with `rerun-failed`
-- **Config system** — cascading INI configs (system → user → project → CLI) so you set paths once and reuse
-
-See the full **[fMRIPrep README](fmriprep/README.md)** for usage examples, configuration guide, TemplateFlow setup, and cluster-specific notes.
-
-### [`xnat_cli/`](xnat_cli/) — XNAT Command-Line Client
-
-- **xnat_cli.R** — an R CLI for [XNAT](https://www.xnat.org/) repositories. List projects, subjects, experiments, and scans; download files for individual subjects or entire projects. Built on the `xnatR` package.
-
-## Quick Install
-
-Each sub-project can be installed independently to `~/bin`:
+Use this if you want general-purpose SLURM helpers such as `qexec.sh`,
+`batch_exec.sh`, `cmd_expand.sh`, or `rjobtop.py`.
 
 ```bash
-# SLURM job submission toolkit
 curl -fsSL https://raw.githubusercontent.com/bbuchsbaum/rriscripts/main/qexec/install.sh | bash
+```
 
-# fMRIPrep launcher (installs to ~/.local/share/fmriprep, symlinks to ~/bin)
+This installs the `qexec` scripts to `~/bin` by default.
+
+To install somewhere else:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bbuchsbaum/rriscripts/main/qexec/install.sh | bash -s -- --prefix /path/to/bin
+```
+
+### Install `fmriprep`
+
+Use this if you want the fMRIPrep launcher and its frontends.
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/bbuchsbaum/rriscripts/main/fmriprep/install.sh | bash
 ```
 
-Use `-- --prefix /dir` (qexec) or `-- --lib-dir /dir --bin-dir /dir` (fmriprep)
-to customize install paths. Or clone the whole repo:
+By default this installs the full launcher bundle under
+`~/.local/share/fmriprep` and symlinks entry points into `~/bin`.
+
+To customize locations:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bbuchsbaum/rriscripts/main/fmriprep/install.sh | bash -s -- --lib-dir /path/to/lib --bin-dir /path/to/bin
+```
+
+### Clone The Full Repository
+
+Use this if you want everything, including the XNAT CLI and the full source
+tree:
 
 ```bash
 git clone https://github.com/bbuchsbaum/rriscripts.git
+cd rriscripts
 ```
+
+If `~/bin` is not already on your `PATH`, add it:
+
+```bash
+echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc
+```
+
+## Choose A Tool
+
+### [`qexec/`](qexec/)
+
+`qexec` is the general SLURM toolkit in this repo.
+
+Main entry points:
+
+- `qexec.sh` submits single interactive or batch jobs
+- `batch_exec.sh` expands parameterized commands and submits them as a SLURM array workflow
+- `bexec.sh` submits a prewritten command file as a batched job
+- `cmd_expand.sh` turns bracket syntax such as `[1..10]` or `[a,b,c]` into concrete commands
+- `send_slurm.sh` accepts commands on stdin and submits them as an array job
+- `rjobtop.py` monitors CPU and memory usage for running SLURM jobs
+- `slurm_job_monitor.sh` waits for jobs to finish and reports efficiency
+
+Also included:
+
+- `command_distributor.sh` for distributing command batches inside array tasks
+- Tcl/Tk frontends for `qexec.sh` and `batch_exec.sh`
+- Haskell implementations of several core `qexec` tools
+
+See the full [`qexec` README](qexec/README.md) for command syntax, examples,
+and cluster-oriented setup details.
+
+### [`fmriprep/`](fmriprep/)
+
+`fmriprep` is a launcher toolkit for generating correct fMRIPrep commands and
+SLURM job bundles for BIDS datasets.
+
+Main entry points:
+
+- `fmriprep_launcher.py` is the canonical CLI
+- `run_fmriprep_wizard.sh` is a convenience wrapper for the wizard flow
+- `fmriprep_tui_autocomplete.py` provides a Textual terminal UI
+- `fmriprep_gui_tk.py` provides a Tk GUI
+
+The launcher currently supports:
+
+- environment probing
+- project and user config initialization
+- command preview via `print-cmd`
+- SLURM array bundle generation via `slurm-array`
+- reruns for failed subjects via `rerun-failed`
+
+See the full [`fmriprep` README](fmriprep/README.md) for configuration,
+runtime detection, TemplateFlow handling, and launcher examples.
+
+### [`xnat_cli/`](xnat_cli/)
+
+`xnat_cli/xnat_cli.R` is an R-based CLI for XNAT repositories built on
+`xnatR`.
+
+It supports:
+
+- authentication and token management
+- listing projects, subjects, experiments, and scans
+- scan search
+- downloading files, experiments, subjects, or full project data
+
+This tool is used directly from the repo unless you choose to symlink or copy
+it into your own `PATH`.
 
 ## Requirements
 
-- **bash** 4.0+, **Python 3.7+**
-- **SLURM** (for job submission scripts)
-- **GNU Parallel** (for `command_distributor.sh`)
-- **R** (for `xnat_cli.R`)
-- **Tcl/Tk** (`wish`) — only for the GUI tools
+Requirements depend on which part of the repo you use.
 
-Most of these are already available on typical HPC clusters.
+- `qexec` needs Bash, Python 3, SLURM, and GNU Parallel for the batched-array workflow
+- `fmriprep` needs Python 3 plus whichever runtime you use to run fMRIPrep, such as Apptainer/Singularity or Docker
+- `xnat_cli` needs R with `optparse` and `xnatR`
+- Tcl/Tk is only needed for the GUI frontends
+
+## More Documentation
+
+- [`qexec/README.md`](qexec/README.md)
+- [`fmriprep/README.md`](fmriprep/README.md)
 
 ## License
 
