@@ -28,6 +28,27 @@ setup() {
     [[ "$output" == *"NCPUS=8"* ]]
 }
 
+@test "batch dry-run: fractional hours are accepted" {
+    run "$QEXEC" --dry-run -t .5 -- myscript.sh
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"TIME=.5"* ]]
+    [[ "$output" == *"minutes=30"* ]]
+}
+
+@test "batch dry-run: minute suffix is accepted" {
+    run "$QEXEC" --dry-run -t 30m -- myscript.sh
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"TIME=30m"* ]]
+    [[ "$output" == *"minutes=30"* ]]
+}
+
+@test "batch dry-run: hour suffix is accepted" {
+    run "$QEXEC" --dry-run -t 1hr -- myscript.sh
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"TIME=1hr"* ]]
+    [[ "$output" == *"minutes=60"* ]]
+}
+
 @test "batch dry-run: memory flag" {
     run "$QEXEC" --dry-run -m 16G -- myscript.sh
     [ "$status" -eq 0 ]
@@ -129,13 +150,13 @@ setup() {
 @test "invalid time value fails" {
     run "$QEXEC" --dry-run -t abc -- myscript.sh
     [ "$status" -ne 0 ]
-    [[ "$output" == *"positive integer"* ]]
+    [[ "$output" == *"positive duration"* ]]
 }
 
 @test "time=0 fails" {
     run "$QEXEC" --dry-run -t 0 -- myscript.sh
     [ "$status" -ne 0 ]
-    [[ "$output" == *"positive integer"* ]]
+    [[ "$output" == *"positive duration"* ]]
 }
 
 @test "invalid ncpus value fails" {
@@ -182,4 +203,163 @@ setup() {
     run "$QEXEC" --help
     # usage exits with 1
     [[ "$output" == *"Usage"* ]]
+}
+
+# ── --cmd-file ────────────────────────────────────────────────────
+
+@test "cmd-file dry-run: sets array and command from file" {
+    tmpfile=$(mktemp)
+    printf 'echo hello\necho world\necho foo\n' > "$tmpfile"
+    run "$QEXEC" --dry-run --cmd-file "$tmpfile"
+    rm -f "$tmpfile"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ARRAY=1-3"* ]]
+    [[ "$output" == *"--array=1-3"* ]]
+    [[ "$output" == *"SLURM_ARRAY_TASK_ID"* ]]
+}
+
+@test "cmd-file: nonexistent file fails" {
+    run "$QEXEC" --dry-run --cmd-file /nonexistent
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"does not exist"* ]]
+}
+
+@test "cmd-file: empty file fails" {
+    tmpfile=$(mktemp)
+    run "$QEXEC" --dry-run --cmd-file "$tmpfile"
+    rm -f "$tmpfile"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"empty"* ]]
+}
+
+@test "cmd-file: conflicts with --array" {
+    tmpfile=$(mktemp)
+    echo "echo hi" > "$tmpfile"
+    run "$QEXEC" --dry-run --cmd-file "$tmpfile" -a 1-5
+    rm -f "$tmpfile"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"mutually exclusive"* ]]
+}
+
+@test "cmd-file: conflicts with positional command" {
+    tmpfile=$(mktemp)
+    echo "echo hi" > "$tmpfile"
+    run "$QEXEC" --dry-run --cmd-file "$tmpfile" -- echo hello
+    rm -f "$tmpfile"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"mutually exclusive"* ]]
+}
+
+# ── --preset ──────────────────────────────────────────────────────
+
+@test "preset dry-run: fmriprep sets time, ncpus, mem" {
+    run "$QEXEC" --dry-run --preset fmriprep -- myscript.sh
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"TIME=12"* ]]
+    [[ "$output" == *"NCPUS=8"* ]]
+    [[ "$output" == *"--mem=32G"* ]]
+}
+
+@test "preset dry-run: freesurfer sets time, ncpus, mem" {
+    run "$QEXEC" --dry-run --preset freesurfer -- myscript.sh
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"TIME=24"* ]]
+    [[ "$output" == *"NCPUS=1"* ]]
+    [[ "$output" == *"--mem=8G"* ]]
+}
+
+@test "preset dry-run: CLI flags override preset" {
+    run "$QEXEC" --dry-run --preset fmriprep -t 2 -n 4 -- myscript.sh
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"TIME=2"* ]]
+    [[ "$output" == *"NCPUS=4"* ]]
+    # mem should still come from preset
+    [[ "$output" == *"--mem=32G"* ]]
+}
+
+@test "preset: unknown preset fails" {
+    run "$QEXEC" --dry-run --preset bogus -- myscript.sh
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Unknown preset"* ]]
+}
+
+@test "preset dry-run: equals-style" {
+    run "$QEXEC" --dry-run --preset=mriqc -- myscript.sh
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"TIME=4"* ]]
+    [[ "$output" == *"NCPUS=4"* ]]
+}
+
+# ── --after ───────────────────────────────────────────────────────
+
+@test "after dry-run: adds dependency flag" {
+    run "$QEXEC" --dry-run --after 12345 -- myscript.sh
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--dependency=afterok:12345"* ]]
+}
+
+@test "after dry-run: equals-style" {
+    run "$QEXEC" --dry-run --after=67890 -- myscript.sh
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--dependency=afterok:67890"* ]]
+}
+
+@test "after: non-numeric job ID fails" {
+    run "$QEXEC" --dry-run --after abc -- myscript.sh
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"numeric"* ]]
+}
+
+@test "after: incompatible with interactive mode" {
+    run "$QEXEC" --dry-run -i --after 12345
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not supported with interactive"* ]]
+}
+
+# ── --wait ────────────────────────────────────────────────────────
+
+@test "wait: incompatible with interactive mode" {
+    run "$QEXEC" --dry-run -i --wait
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not supported with interactive"* ]]
+}
+
+# ── cluster detection ─────────────────────────────────────────────
+
+@test "CC_CLUSTER=niagara sets no-mem and ncpus=40" {
+    CC_CLUSTER=niagara run "$QEXEC" --dry-run -- myscript.sh
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"NCPUS=40"* ]]
+    [[ "$output" == *"MEM_FLAG=<none>"* ]]
+}
+
+@test "CC_CLUSTER=niagara: CLI ncpus overrides cluster default" {
+    CC_CLUSTER=niagara run "$QEXEC" --dry-run -n 8 -- myscript.sh
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"NCPUS=8"* ]]
+}
+
+# ── qexecrc ───────────────────────────────────────────────────────
+
+@test "QEXEC_CONFIG loads custom defaults" {
+    tmprc=$(mktemp)
+    echo 'ACCOUNT="def-mypi"' > "$tmprc"
+    QEXEC_CONFIG="$tmprc" run "$QEXEC" --dry-run -- myscript.sh
+    rm -f "$tmprc"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ACCOUNT=def-mypi"* ]]
+}
+
+@test "QEXEC_CONFIG: CLI overrides config file" {
+    tmprc=$(mktemp)
+    echo 'TIME=8' > "$tmprc"
+    QEXEC_CONFIG="$tmprc" run "$QEXEC" --dry-run -t 2 -- myscript.sh
+    rm -f "$tmprc"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"TIME=2"* ]]
+}
+
+@test "missing qexecrc is silently ignored" {
+    QEXEC_CONFIG=/nonexistent/qexecrc run "$QEXEC" --dry-run -- myscript.sh
+    [ "$status" -eq 0 ]
 }

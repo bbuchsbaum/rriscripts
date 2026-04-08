@@ -9,7 +9,8 @@ set -euo pipefail
 #   qexec.sh [options] <command>
 #
 # Options:
-#   -t, --time             Time in hours to allocate for the job (default: "1").
+#   -t, --time             Time to allocate; bare numbers are hours
+#                          (examples: 1, .5, 30m, 1hr; default: "1").
 #   -i, --interactive      Submit an interactive job (default: false).
 #   -m, --mem              Amount of memory per node (default: not set).
 #   -n, --ncpus            Number of CPUs per task (default: "1").
@@ -20,6 +21,16 @@ set -euo pipefail
 #       --nox11            Disable X11 forwarding (default: false).
 #   -o, --omp_num_threads  Number of OpenMP threads (default: 1).
 #       --no-mem           Do not pass --mem to Slurm (overrides -m/--mem).
+#       --cmd-file FILE    Read commands from FILE and submit as an array job
+#                          (one command per line; sets --array automatically).
+#       --preset NAME      Load a named resource preset (e.g., fmriprep, freesurfer).
+#       --after JOBID      Run after JOBID completes (adds --dependency=afterok:JOBID).
+#   -w, --wait             Wait for the job to finish and show efficiency stats.
+#
+# Configuration:
+#   ~/.qexecrc             Optional config file sourced before arg parsing.
+#                          Set any default variable (TIME, MEM, NCPUS, ACCOUNT, etc.).
+#                          Cluster is auto-detected via $CC_CLUSTER or hostname.
 #
 # Arguments:
 #   <command>              Command to execute in the job (required unless interactive mode is used).
@@ -38,19 +49,78 @@ OMP_NUM_THREADS=1
 LOG_DIR="${QEXEC_LOG_DIR:-}"
 DRY_RUN=false
 NO_MEM=false
+CMD_FILE=""
+AFTER=""
+PRESET=""
+WAIT=false
 COMMAND=""
+
+# Cluster auto-detection: set sensible defaults per cluster.
+# Runs before qexecrc so user config can override.
+_qexec_detect_cluster() {
+    local cluster="${CC_CLUSTER:-}"
+    if [[ -z "$cluster" ]]; then
+        local host
+        host="$(hostname -f 2>/dev/null || hostname 2>/dev/null || true)"
+        case "$host" in
+            *niagara*|*nia*|*trillium*|*trl*) cluster="niagara" ;;
+            *narval*|*nar*)                    cluster="narval" ;;
+            *beluga*|*blg*)                    cluster="beluga" ;;
+            *cedar*|*cdr*)                     cluster="cedar" ;;
+            *graham*|*gra*)                    cluster="graham" ;;
+        esac
+    fi
+    case "$cluster" in
+        niagara)
+            NO_MEM=true
+            NCPUS=40
+            ;;
+    esac
+}
+_qexec_detect_cluster
+
+# Optional config file (defaults that CLI flags override)
+QEXEC_CONFIG="${QEXEC_CONFIG:-$HOME/.qexecrc}"
+if [[ -f "$QEXEC_CONFIG" ]]; then
+    # shellcheck source=/dev/null
+    source "$QEXEC_CONFIG"
+fi
 
 # If set (any value), skip adding --mem even if provided
 if [ -n "${QEXEC_DISABLE_MEM:-}" ]; then
     NO_MEM=true
 fi
 
+# Built-in presets and user preset loader
+_qexec_apply_preset() {
+    local name="$1"
+    local user_preset="${HOME}/.qexec/presets/${name}"
+    if [[ -f "$user_preset" ]]; then
+        # shellcheck source=/dev/null
+        source "$user_preset"
+        return
+    fi
+    case "$name" in
+        fmriprep)    TIME=12; NCPUS=8;  MEM=32G ;;
+        freesurfer)  TIME=24; NCPUS=1;  MEM=8G  ;;
+        mriqc)       TIME=4;  NCPUS=4;  MEM=16G ;;
+        light)       TIME=1;  NCPUS=1;  MEM=4G  ;;
+        heavy)       TIME=24; NCPUS=16; MEM=64G ;;
+        *)
+            echo "Error: Unknown preset '$name'." >&2
+            echo "Built-in presets: fmriprep, freesurfer, mriqc, light, heavy" >&2
+            echo "Or create a custom preset at ~/.qexec/presets/$name" >&2
+            exit 1
+            ;;
+    esac
+}
+
 # Help message
 usage() {
     echo "Usage: $0 [options] <command>"
     echo ""
     echo "Options:"
-    echo "  -t, --time             Time in hours to allocate for the job (default: 1)."
+    echo "  -t, --time             Time to allocate; bare numbers are hours (e.g. 1, .5, 30m, 1hr)."
     echo "  -i, --interactive      Submit an interactive job (default: false)."
     echo "  -m, --mem              Amount of memory per node (default: not set)."
     echo "  -n, --ncpus            Number of CPUs per task (default: 1)."
@@ -61,6 +131,10 @@ usage() {
     echo "      --nox11            Disable X11 forwarding (default: false)."
     echo "  -o, --omp_num_threads  Number of OpenMP threads (default: 1)."
     echo "      --no-mem           Do not pass --mem to Slurm (overrides -m/--mem)."
+    echo "      --cmd-file FILE    Read commands from FILE and submit as an array job."
+    echo "      --preset NAME      Load resource preset (fmriprep, freesurfer, mriqc, light, heavy)."
+    echo "      --after JOBID      Run after JOBID completes (sbatch --dependency=afterok:JOBID)."
+    echo "  -w, --wait             Wait for the job to finish and show efficiency stats."
     echo "  -l, --log-dir          Directory for log output (default: current dir or \$QEXEC_LOG_DIR)."
     echo "  -d, --dry-run          Show computed SLURM command and exit."
     echo ""
@@ -68,8 +142,10 @@ usage() {
     echo "  <command>              Command to execute in the job (required unless interactive mode is used)."
     echo ""
     echo "Environment:"
+    echo "  QEXEC_CONFIG=FILE      Path to config file (default: ~/.qexecrc)."
     echo "  QEXEC_DISABLE_MEM=1    Skip --mem even if provided (for whole-node clusters)."
     echo "  QEXEC_DEFAULT_MEM=VAL  Default memory request unless disabled or overridden."
+    echo "  CC_CLUSTER=NAME        Override cluster auto-detection (niagara, narval, etc.)."
     exit 1
 }
 
@@ -79,6 +155,43 @@ require_value() {
         echo "Error: ${flag} requires a value." >&2
         usage
     fi
+}
+
+_qexec_parse_time_to_minutes() {
+    local input="$1"
+    local normalized=""
+    local quantity=""
+    local unit=""
+
+    # Keep bare numbers as hours for backward compatibility while allowing unit suffixes.
+    normalized="$(printf '%s' "$input" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+
+    if [[ "$normalized" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]]; then
+        quantity="${BASH_REMATCH[1]}"
+        unit="hours"
+    elif [[ "$normalized" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)(h|hr|hrs|hour|hours)$ ]]; then
+        quantity="${BASH_REMATCH[1]}"
+        unit="hours"
+    elif [[ "$normalized" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)(m|min|mins|minute|minutes)$ ]]; then
+        quantity="${BASH_REMATCH[1]}"
+        unit="minutes"
+    else
+        return 1
+    fi
+
+    awk -v quantity="$quantity" -v unit="$unit" '
+        BEGIN {
+            minutes = (unit == "minutes") ? quantity : quantity * 60
+            if (minutes <= 0) {
+                exit 1
+            }
+            rounded = int(minutes)
+            if (minutes > rounded) {
+                rounded++
+            }
+            print rounded
+        }
+    '
 }
 
 while [[ $# -gt 0 ]]; do
@@ -172,6 +285,39 @@ while [[ $# -gt 0 ]]; do
             LOG_DIR="${1#--log-dir=}"
             shift
             ;;
+        --cmd-file)
+            require_value "$1" "$2"
+            CMD_FILE="$2"
+            shift 2
+            ;;
+        --cmd-file=*)
+            CMD_FILE="${1#--cmd-file=}"
+            shift
+            ;;
+        --preset)
+            require_value "$1" "$2"
+            PRESET="$2"
+            _qexec_apply_preset "$PRESET"
+            shift 2
+            ;;
+        --preset=*)
+            PRESET="${1#--preset=}"
+            _qexec_apply_preset "$PRESET"
+            shift
+            ;;
+        --after)
+            require_value "$1" "$2"
+            AFTER="$2"
+            shift 2
+            ;;
+        --after=*)
+            AFTER="${1#--after=}"
+            shift
+            ;;
+        -w|--wait)
+            WAIT=true
+            shift
+            ;;
         --no-mem)
             NO_MEM=true
             shift
@@ -199,14 +345,56 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# --cmd-file: validate file, set ARRAY and COMMAND automatically
+if [[ -n "$CMD_FILE" ]]; then
+    if [[ ! -f "$CMD_FILE" ]]; then
+        echo "Error: --cmd-file '$CMD_FILE' does not exist." >&2
+        exit 1
+    fi
+    NUM_LINES=$(grep -c . "$CMD_FILE" || true)
+    if [[ "$NUM_LINES" -eq 0 ]]; then
+        echo "Error: --cmd-file '$CMD_FILE' is empty." >&2
+        exit 1
+    fi
+    if [[ -n "$ARRAY" ]]; then
+        echo "Error: --cmd-file and --array are mutually exclusive." >&2
+        exit 1
+    fi
+    if [[ -n "$COMMAND" ]]; then
+        echo "Error: --cmd-file and a positional command are mutually exclusive." >&2
+        exit 1
+    fi
+    CMD_FILE="$(cd "$(dirname "$CMD_FILE")" && pwd)/$(basename "$CMD_FILE")"
+    ARRAY="1-${NUM_LINES}"
+    COMMAND="sed -n \"\${SLURM_ARRAY_TASK_ID}p\" \"${CMD_FILE}\" | bash"
+fi
+
 if [[ -n "$ARRAY" ]] && ! [[ "$ARRAY" =~ ^[0-9]+(-[0-9]+)?(%[0-9]+)?$ ]]; then
     echo "Error: --array requires a valid range (e.g., 1-5 or 1-10%2)" >&2
     usage
 fi
 
-# Validate TIME is a positive integer
-if ! [[ "$TIME" =~ ^[1-9][0-9]*$ ]]; then
-    echo "Error: --time must be a positive integer (hours)." >&2
+# Validate --after is a numeric job ID
+if [[ -n "$AFTER" ]] && ! [[ "$AFTER" =~ ^[0-9]+$ ]]; then
+    echo "Error: --after requires a numeric Slurm job ID." >&2
+    exit 1
+fi
+
+# --wait and --after are batch-only
+if [[ "$INTERACTIVE" == "true" ]]; then
+    if [[ "$WAIT" == true ]]; then
+        echo "Error: --wait is not supported with interactive jobs." >&2
+        exit 1
+    fi
+    if [[ -n "$AFTER" ]]; then
+        echo "Error: --after is not supported with interactive jobs." >&2
+        exit 1
+    fi
+fi
+
+# Validate TIME and convert to Slurm minutes.
+if ! TIME_MINUTES="$(_qexec_parse_time_to_minutes "$TIME")"; then
+    echo "Error: --time must be a positive duration in hours by default (e.g. 1, .5, 30m, 1hr)." >&2
     exit 1
 fi
 
@@ -249,7 +437,6 @@ fi
 
 if [ "$INTERACTIVE" == "true" ]; then
     # Interactive job: build salloc command as an array
-    TIME_MINUTES=$((TIME * 60))
     SALLOC_CMD=(salloc --time="${TIME_MINUTES}" --account="${ACCOUNT}" --cpus-per-task="${NCPUS}" --nodes="${NODES}")
     [ -n "$MEM_FLAG" ] && SALLOC_CMD+=("${MEM_FLAG}")
     if [ "$NOX11" == "false" ]; then
@@ -272,8 +459,6 @@ if [ "$INTERACTIVE" == "true" ]; then
     "${SALLOC_CMD[@]}"
 else
     # Batch job: build sbatch command as an array
-    TIME_MINUTES=$((TIME * 60))
-
     # Expand a common ~/bin shorthand without mutating other command arguments.
     CLEAN_CMD=$(printf '%s' "$COMMAND" | sed "s|~/bin|$HOME/bin|g")
 
@@ -281,6 +466,7 @@ else
         # Build the sbatch args for display
         SBATCH_CMD=(sbatch)
         [ -n "$ARRAY" ] && SBATCH_CMD+=(--array="${ARRAY}")
+        [ -n "$AFTER" ] && SBATCH_CMD+=(--dependency="afterok:${AFTER}")
         SBATCH_CMD+=(--time="${TIME_MINUTES}" --account="${ACCOUNT}" --cpus-per-task="${NCPUS}" --nodes="${NODES}")
         [ -n "$MEM_FLAG" ] && SBATCH_CMD+=("${MEM_FLAG}")
         [ -n "$JOB_NAME" ] && SBATCH_CMD+=(--job-name="${JOB_NAME}")
@@ -323,6 +509,7 @@ JOBEOF
     # Build sbatch command as an array for safe execution
     SBATCH_CMD=(sbatch)
     [ -n "$ARRAY" ] && SBATCH_CMD+=(--array="${ARRAY}")
+    [ -n "$AFTER" ] && SBATCH_CMD+=(--dependency="afterok:${AFTER}")
     SBATCH_CMD+=(--time="${TIME_MINUTES}" --account="${ACCOUNT}" --cpus-per-task="${NCPUS}" --nodes="${NODES}")
     [ -n "$MEM_FLAG" ] && SBATCH_CMD+=("${MEM_FLAG}")
     [ -n "$JOB_NAME" ] && SBATCH_CMD+=(--job-name="${JOB_NAME}")
@@ -336,5 +523,24 @@ JOBEOF
     SBATCH_CMD+=("$JOB_SCRIPT")
 
     echo "Executing: ${SBATCH_CMD[*]}"
-    "${SBATCH_CMD[@]}"
+    if [[ "$WAIT" == true ]]; then
+        SBATCH_OUTPUT=$("${SBATCH_CMD[@]}")
+        echo "$SBATCH_OUTPUT"
+        SUBMITTED_JOB_ID=$(echo "$SBATCH_OUTPUT" | grep -oE '[0-9]+$' | head -1)
+        if [[ -n "$SUBMITTED_JOB_ID" ]]; then
+            SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+            MONITOR_PATH="${SCRIPT_DIR}/slurm_job_monitor.sh"
+            if [[ -x "$MONITOR_PATH" ]]; then
+                echo "Waiting for job $SUBMITTED_JOB_ID to finish..."
+                "$MONITOR_PATH" "$SUBMITTED_JOB_ID"
+            else
+                echo "Warning: slurm_job_monitor.sh not found at $MONITOR_PATH; cannot wait." >&2
+                echo "Job $SUBMITTED_JOB_ID submitted but not monitored." >&2
+            fi
+        else
+            echo "Warning: could not parse job ID from sbatch output; cannot wait." >&2
+        fi
+    else
+        "${SBATCH_CMD[@]}"
+    fi
 fi
