@@ -1,51 +1,37 @@
 # fmriprep/ — fMRIPrep Launcher Toolkit
 
-This directory contains one backend with several frontends for building correct
-[fMRIPrep](https://fmriprep.org) commands and generating SLURM array jobs for
-BIDS datasets.
-
-The important distinction is:
+This directory contains one backend (`fmriprep_launcher.py`) with optional
+frontends for building correct [fMRIPrep](https://fmriprep.org) commands and
+generating SLURM array jobs for BIDS datasets.
 
 - `fmriprep_launcher.py` is the canonical entrypoint.
-- The Textual UI, Tk UI, and shell wrapper are optional frontends.
-- `fmriprep_command_builder.py` is a legacy interactive frontend kept for compatibility.
-- INI is the canonical config format.
-- The `config_*.json` files are legacy examples and are not read by the current launcher.
+- The Textual TUI and Tk GUI are optional alternative frontends.
+- INI is the only supported config format.
 
 ## Start Here
 
-For most users, the recommended path is:
+The recommended path:
 
 1. Probe your environment.
-2. Generate a project config with `fmriprep_launcher.py init`.
-3. Edit the generated `fmriprep.ini` for your dataset.
-4. Run `fmriprep_launcher.py wizard --quick`.
-5. Use `print-cmd` or `slurm-array` directly once the config is stable.
-6. If some subjects fail, use `rerun-failed` on the generated `job_manifest.json`.
+2. Generate a user config (once) with `fmriprep_launcher.py init --user`.
+3. Generate a project config with `fmriprep_launcher.py init` from your BIDS root.
+4. Edit `fmriprep.ini` for your dataset.
+5. Run `fmriprep_launcher.py wizard --quick` to verify and generate the sbatch.
+6. Use `print-cmd` or `slurm-array` directly once the config is stable.
+7. If subjects fail, use `rerun-failed` on the generated `job_manifest.json`.
 
-### Canonical Entry Points
-
-| File | Status | Purpose |
-|---|---|---|
-| **fmriprep_launcher.py** | Recommended | Main CLI with subcommands: `init`, `probe`, `print-cmd`, `slurm-array`, `rerun-failed`, and `wizard`. Owns runtime detection, config loading, subject discovery, command generation, SLURM script generation, and retry bundle generation for failed subjects. |
-| **run_fmriprep_wizard.sh** | Convenience | Wrapper that activates a likely virtualenv and launches `fmriprep_launcher.py wizard`. |
-| **fmriprep_project_example.ini** | Recommended | Project-level config example (`./fmriprep.ini`). This is the most useful config file for repeatable runs. |
-| **fmriprep_config_example.ini** | Optional | User-level config example (`~/.config/fmriprep/config.ini`). Useful for personal defaults shared across projects. |
-
-### Optional Frontends
+### Files
 
 | File | Purpose |
 |---|---|
-| **fmriprep_tui_autocomplete.py** | Terminal UI built with [Textual](https://textual.textualize.io/). Best terminal frontend when `textual` is available. |
-| **fmriprep_gui_tk.py** | Tk GUI for clusters or desktops where Textual is unavailable but Tk/X11 works. |
-
-### Compatibility / Internal Files
-
-| File | Status | Notes |
-|---|---|---|
-| **fmriprep_command_builder.py** | Legacy frontend | Older interactive questionary-based builder. Prefer `fmriprep_launcher.py wizard`. |
-| **slurm_batched_template.sh** | Internal template | Used by the launcher when generating batched SLURM jobs. Not intended as a primary user entrypoint. |
-| **config_simple.json** / **config_fixed.json** / **config_v3.json** | Legacy examples | Not read by the current launcher. Keep only as historical examples unless you have an external workflow that still uses them. |
+| **fmriprep_launcher.py** | Main CLI: `init`, `probe`, `print-cmd`, `slurm-array`, `rerun-failed`, `wizard`, `tui`, `gui`. |
+| **fmriprep_backend.py** | `BuildConfig`, command construction, SLURM script template, manifest I/O. |
+| **fmriprep_shared.py** | INI loading, runtime detection, subject discovery, memory parsing. |
+| **fmriprep_tui_autocomplete.py** | Optional Textual TUI (`pip install textual`). |
+| **fmriprep_gui_tk.py** | Optional Tk GUI (needs Tk + X11). |
+| **fmriprep.ini.example** | Annotated example config covering both user-level and project-level keys. |
+| **run_fmriprep_wizard.sh** | Convenience wrapper that activates a likely venv before launching the wizard. |
+| **install.sh** | One-shot installer to `~/.local/share/fmriprep` with symlinks in `~/bin`. |
 
 ## Quick Start
 
@@ -92,10 +78,10 @@ Options:
 - `--force` — overwrite an existing config file
 - `init /path/to/dir` — write project config to a specific directory
 
-You can also copy an example manually:
+You can also copy the annotated example manually:
 
 ```bash
-cp fmriprep_project_example.ini /path/to/my_study/fmriprep.ini
+cp fmriprep.ini.example /path/to/my_study/fmriprep.ini
 ```
 
 The launcher reads INI-format config files in priority order (later files
@@ -260,9 +246,6 @@ log_dir = /scratch/myuser/fmriprep_logs
 
 Boolean values are case-insensitive (`true`/`True`/`TRUE` all work). Inline
 comments use `#` (preferred) or `;`.
-
-Use INI for all current workflows. The JSON example files in this directory are
-legacy artifacts and are not loaded by `fmriprep_launcher.py`.
 
 ## TemplateFlow on Air-Gapped Compute Nodes
 

@@ -18,11 +18,8 @@ SCRIPTS=(
     fmriprep_shared.py
     fmriprep_tui_autocomplete.py
     fmriprep_gui_tk.py
-    fmriprep_command_builder.py
     run_fmriprep_wizard.sh
-    slurm_batched_template.sh
-    fmriprep_config_example.ini
-    fmriprep_project_example.ini
+    fmriprep.ini.example
 )
 
 # Entry points to symlink into BIN_DIR

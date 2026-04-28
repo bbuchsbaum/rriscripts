@@ -1,0 +1,95 @@
+# fmriprep.ini — annotated example
+#
+# The launcher reads INI files in priority order (later overrides earlier):
+#   1. /etc/fmriprep/config.ini                    (system-wide)
+#   2. ~/.config/fmriprep/config.ini  or  ~/.fmriprep.ini   (user-level)
+#   3. ./fmriprep.ini                              (project, recommended)
+#   4. --config /path/to/file.ini                  (explicit override)
+#
+# Recommended split:
+#   • USER level    — stable infrastructure: runtime, container, fs_license,
+#                     templateflow_home, account, partition.
+#   • PROJECT level — dataset-specific: bids, out, work, subjects,
+#                     output_spaces, job_name, log_dir.
+#
+# Generate either with:
+#   fmriprep_launcher.py init --user      # writes ~/.config/fmriprep/config.ini
+#   fmriprep_launcher.py init             # writes ./fmriprep.ini in current dir
+#
+# Lines starting with '#' are comments. Inline comments use '#'.
+# Boolean values are case-insensitive (true/True/TRUE).
+
+[defaults]
+
+# ── Paths (project level) ──────────────────────────────────────────────
+# bids = /path/to/bids/dataset
+# out  = /path/to/bids/dataset/derivatives/fmriprep
+# work = /scratch/$USER/fmriprep_work
+
+# ── Container (user level) ─────────────────────────────────────────────
+# 'singularity' covers both Singularity and Apptainer.
+runtime = singularity
+# container = /project/def-piname/shared/bin/fmriprep_24.1.0.sif
+# container = auto                    # search $FMRIPREP_SIF_DIR
+
+# ── FreeSurfer & TemplateFlow (user level) ─────────────────────────────
+# fs_license        = /project/def-piname/shared/bin/license.txt
+# templateflow_home = /project/def-piname/shared/opt/templateflow
+
+# ── Resources ──────────────────────────────────────────────────────────
+nprocs       = 8
+omp_threads  = 4
+mem_mb       = 32000                  # also accepts 32G, 2T
+
+# ── fMRIPrep options ───────────────────────────────────────────────────
+skip_bids_validation = true
+# output_spaces      = MNI152NLin2009cAsym:res-2 T1w fsnative
+# fs_reconall        = true
+# use_syn_sdc        = false
+# cifti_output       = false
+# extra              = --stop-on-first-crash
+
+# ── Subjects (project level) ───────────────────────────────────────────
+# subjects = all
+# subjects = sub-01 sub-02 sub-03
+
+[slurm]
+
+partition = compute
+time      = 24:00:00
+# account   = def-piname
+job_name  = fmriprep
+# email     = user@university.ca
+# mail_type = END,FAIL
+
+# Override log directory (use scratch on Trillium / Compute Canada)
+# log_dir = /scratch/$USER/fmriprep_logs
+
+# Whole-node clusters (e.g. Trillium): omit --mem in the SLURM header
+# no_mem = true
+
+# Insert 'module load singularity' at top of generated sbatch
+# module_singularity = true
+
+# ── Cluster snippets (uncomment + adapt one) ───────────────────────────
+
+# # Compute Canada / Digital Research Alliance
+# [defaults]
+# work       = /scratch/$USER/fmriprep_work
+# container  = /project/def-pi/shared/containers/fmriprep-24.1.0.sif
+# fs_license = /project/def-pi/shared/freesurfer/license.txt
+# [slurm]
+# account    = def-pi
+# time       = 24:00:00
+# mem        = 32G
+
+# # Trillium (whole-node scheduling)
+# [defaults]
+# work       = /scratch/$USER/work
+# container  = /project/rrg-pi/shared/bin/fmriprep-latest.sif
+# fs_license = /project/rrg-pi/shared/bin/license.txt
+# [slurm]
+# account    = rrg-pi
+# time       = 12:00:00
+# no_mem     = true
+# log_dir    = /scratch/$USER/logs
