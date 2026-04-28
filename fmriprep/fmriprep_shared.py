@@ -13,8 +13,70 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+
+def default_script_outdir(bids: Optional[Path] = None) -> Path:
+    """Pick a sensible default for the SLURM bundle directory.
+
+    The bundle holds runtime-mutated state (status/) that is written from
+    compute nodes. On HPC clusters where the submit-side filesystem is
+    read-only from compute nodes (e.g. /project on Trillium), placing it
+    in CWD breaks the job.
+
+    If $SCRATCH is set, prefer it. Otherwise fall back to ./fmriprep_job.
+    """
+    scratch = os.environ.get("SCRATCH")
+    if scratch:
+        name = f"{bids.name}_fmriprep_job" if bids is not None else "fmriprep_job"
+        return Path(scratch) / name
+    return Path.cwd() / "fmriprep_job"
+
+
+def warn_if_bundle_not_compute_writable(script_outdir: Path) -> None:
+    """Warn if script_outdir is unlikely to be writable from compute nodes.
+
+    Runtime-only check (no actual fs probe — login and compute nodes have
+    different mounts). If $SCRATCH is set but the chosen bundle path is not
+    under $SCRATCH, $TMPDIR, or any /scratch* / /tmp prefix, print a one-line
+    warning to stderr.
+    """
+    scratch = os.environ.get("SCRATCH")
+    if not scratch:
+        return
+
+    try:
+        resolved = script_outdir.expanduser().resolve()
+    except OSError:
+        resolved = script_outdir.expanduser()
+
+    safe_roots: List[Path] = []
+    for env_var in ("SCRATCH", "TMPDIR"):
+        value = os.environ.get(env_var)
+        if value:
+            try:
+                safe_roots.append(Path(value).resolve())
+            except OSError:
+                pass
+    for root in safe_roots:
+        if resolved == root or root in resolved.parents:
+            return
+    for prefix in ("/scratch", "/tmp"):
+        if str(resolved) == prefix or str(resolved).startswith(prefix + "/"):
+            return
+
+    suggested = Path(scratch) / resolved.name
+    print(
+        f"\n⚠ Bundle dir {resolved} is not under $SCRATCH or a /scratch path.\n"
+        f"  Status markers are written from compute nodes at runtime; if your\n"
+        f"  cluster mounts this path read-only on compute nodes (e.g. Trillium\n"
+        f"  /project), the job will fail with 'Permission denied'.\n"
+        f"  Consider:  --script-outdir {suggested}\n"
+        f"  or in fmriprep.ini: [slurm] script_outdir = {suggested}\n",
+        file=sys.stderr,
+    )
 
 
 def load_config(config_paths: List[str] | None = None) -> Dict[str, str]:

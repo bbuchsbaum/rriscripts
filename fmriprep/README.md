@@ -315,7 +315,7 @@ log_dir = /scratch/myuser/fmriprep_logs
 | `account` | string | — | SLURM account/allocation (e.g. `def-piname`) |
 | `job_name` | string | `fmriprep` | SLURM job name |
 | `log_dir` | path | `<script_outdir>/logs` | Directory for SLURM stdout/stderr logs |
-| `script_outdir` | path | `./fmriprep_job` | Where to write the generated sbatch script and subject list |
+| `script_outdir` | path | `$SCRATCH/<bids>_fmriprep_job` if `$SCRATCH` set, else `./fmriprep_job` | Where to write the generated sbatch + bundle. Must be writable from compute nodes (`status/` is mutated at runtime). |
 | `cpus_per_task` | int | from `nprocs` | Override `--cpus-per-task` in the SLURM header |
 | `mem` | string | from `mem_mb` | SLURM `--mem` value (e.g. `32G`). Use `none` to omit |
 | `no_mem` | bool | `false` | Omit `--mem` entirely (for whole-node clusters like Trillium) |
@@ -336,6 +336,29 @@ use `#` (preferred) or `;`.
 
 ## Cluster Notes
 
+### Bundle directory and read-only filesystems
+
+The bundle dir (`script_outdir`) holds runtime-mutated state — `status/`
+markers are written from compute nodes during the job. If `script_outdir`
+sits on a filesystem that's read-only from compute nodes (Trillium and some
+Alliance clusters mount `/project` read-only there), the job dies before
+fMRIPrep starts with `Permission denied` on `status/sub-XXX.running`.
+
+The launcher handles this automatically: if `$SCRATCH` is set, the default
+`script_outdir` is `$SCRATCH/<bids-basename>_fmriprep_job`. If you override
+it to a path that isn't under `$SCRATCH` (or `/scratch*`, `/tmp`, `$TMPDIR`)
+the launcher prints a warning at generation time.
+
+To set explicitly:
+
+```ini
+[slurm]
+script_outdir = /scratch/$USER/mystudy_fmriprep_job
+```
+
+Or pass `--script-outdir` to `slurm-array`. `out` and `work` should also be
+on scratch — both are written from compute nodes at runtime.
+
 ### Trillium (whole-node scheduling)
 
 Trillium allocates entire nodes, so `--mem` in SLURM directives causes errors:
@@ -346,7 +369,8 @@ no_mem = true
 ```
 
 Equivalent CLI flag: `--no-mem`. In the wizard, answer "n" to "Specify memory
-limit?".
+limit?". On Trillium also see the bundle-dir note above — `/project` is
+read-only from compute nodes.
 
 ### Subject batching
 

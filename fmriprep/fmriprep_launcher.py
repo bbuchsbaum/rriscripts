@@ -47,6 +47,7 @@ from fmriprep_backend import (
 )
 from fmriprep_shared import (
     default_resources_from_env,
+    default_script_outdir,
     detect_runtime,
     discover_sif_images,
     discover_subjects,
@@ -54,6 +55,7 @@ from fmriprep_shared import (
     load_config,
     mb_to_human,
     parse_memory_to_mb,
+    warn_if_bundle_not_compute_writable,
 )
 
 
@@ -502,8 +504,10 @@ def cmd_slurm_array(args):
         for e in errors:
             print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-    out_dir = args.script_outdir.expanduser().resolve()
+    script_outdir = args.script_outdir if args.script_outdir is not None else default_script_outdir(bids)
+    out_dir = script_outdir.expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
+    warn_if_bundle_not_compute_writable(out_dir)
 
     # Create subject batches
     subj_file = out_dir / "subjects.txt"
@@ -1002,8 +1006,12 @@ def cmd_wizard_review(args, config):
     # SLURM generation
     gen = input("\nGenerate SLURM array script? (Y/n): ").strip().lower()
     if gen in ('', 'y', 'yes'):
-        outdir = Path(config.get('slurm_script_outdir', str(Path.cwd() / "fmriprep_job"))).expanduser()
+        if config.get('slurm_script_outdir'):
+            outdir = Path(config['slurm_script_outdir']).expanduser()
+        else:
+            outdir = default_script_outdir(final_bids)
         outdir.mkdir(parents=True, exist_ok=True)
+        warn_if_bundle_not_compute_writable(outdir)
         final_out.mkdir(parents=True, exist_ok=True)
         final_work.mkdir(parents=True, exist_ok=True)
 
@@ -1209,8 +1217,12 @@ def cmd_wizard_quick(args, config):
     # Generate SLURM script
     gen = ask("Generate SLURM array script?", choices=["y", "n"])
     if gen == "y":
-        outdir = Path(config.get('slurm_script_outdir', str(Path.cwd() / "fmriprep_job"))).expanduser()
+        if config.get('slurm_script_outdir'):
+            outdir = Path(config['slurm_script_outdir']).expanduser()
+        else:
+            outdir = default_script_outdir(bids)
         outdir.mkdir(parents=True, exist_ok=True)
+        warn_if_bundle_not_compute_writable(outdir)
 
         subj_file = outdir / "subjects.txt"
         write_subject_batches(subj_file, selected_subjects)
@@ -1379,9 +1391,10 @@ Environment variables: FMRIPREP_SIF_DIR, FS_LICENSE, TEMPLATEFLOW_HOME
     # slurm-array
     p_slurm = sub.add_parser("slurm-array", help="Generate a Slurm array script and subject list")
     add_common_args(p_slurm, config)
-    p_slurm.add_argument("--script-outdir", type=Path, 
-                        default=Path(config.get("slurm_script_outdir", "./fmriprep_job")), 
-                        help="Where to write sbatch and logs/")
+    p_slurm.add_argument("--script-outdir", type=Path,
+                        default=Path(config["slurm_script_outdir"]) if config.get("slurm_script_outdir") else None,
+                        help="Where to write sbatch + bundle (default: $SCRATCH/<bids>_fmriprep_job if $SCRATCH is set, else ./fmriprep_job). "
+                             "Must be writable from compute nodes — status/ markers are written there at runtime.")
     p_slurm.add_argument("--partition", default=config.get("slurm_partition", "compute"))
     p_slurm.add_argument("--time", default=config.get("slurm_time", "24:00:00"), help="Walltime, e.g. 24:00:00")
     p_slurm.add_argument("--cpus-per-task", type=int, 
