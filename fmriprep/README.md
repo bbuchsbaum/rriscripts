@@ -1,143 +1,218 @@
 # fmriprep/ — fMRIPrep Launcher Toolkit
 
-This directory contains one backend (`fmriprep_launcher.py`) with optional
-frontends for building correct [fMRIPrep](https://fmriprep.org) commands and
-generating SLURM array jobs for BIDS datasets.
+A single CLI (`fmriprep_launcher.py`) that builds correct
+[fMRIPrep](https://fmriprep.org) commands and generates SLURM array jobs for
+BIDS datasets. Supports Singularity/Apptainer, the `fmriprep-docker` wrapper,
+and plain Docker. INI is the only supported config format.
 
-- `fmriprep_launcher.py` is the canonical entrypoint.
-- The Textual TUI and Tk GUI are optional alternative frontends.
-- INI is the only supported config format.
+Optional Textual TUI and Tk GUI frontends are available; everything below uses
+the CLI.
 
-## Start Here
+## Install
 
-The recommended path:
+```bash
+curl -fsSL https://raw.githubusercontent.com/bbuchsbaum/rriscripts/main/fmriprep/install.sh | bash
+```
 
-1. Probe your environment.
-2. Generate a user config (once) with `fmriprep_launcher.py init --user`.
-3. Generate a project config with `fmriprep_launcher.py init` from your BIDS root.
-4. Edit `fmriprep.ini` for your dataset.
-5. Run `fmriprep_launcher.py wizard --quick` to verify and generate the sbatch.
-6. Use `print-cmd` or `slurm-array` directly once the config is stable.
-7. If subjects fail, use `rerun-failed` on the generated `job_manifest.json`.
+This installs the launcher to `~/.local/share/fmriprep` and symlinks
+`fmriprep_launcher.py` and `run_fmriprep_wizard.sh` into `~/bin`.
 
-### Files
+To customize directories:
 
-| File | Purpose |
-|---|---|
-| **fmriprep_launcher.py** | Main CLI: `init`, `probe`, `print-cmd`, `slurm-array`, `rerun-failed`, `wizard`, `tui`, `gui`. |
-| **fmriprep_backend.py** | `BuildConfig`, command construction, SLURM script template, manifest I/O. |
-| **fmriprep_shared.py** | INI loading, runtime detection, subject discovery, memory parsing. |
-| **fmriprep_tui_autocomplete.py** | Optional Textual TUI (`pip install textual`). |
-| **fmriprep_gui_tk.py** | Optional Tk GUI (needs Tk + X11). |
-| **fmriprep.ini.example** | Annotated example config covering both user-level and project-level keys. |
-| **run_fmriprep_wizard.sh** | Convenience wrapper that activates a likely venv before launching the wizard. |
-| **install.sh** | One-shot installer to `~/.local/share/fmriprep` with symlinks in `~/bin`. |
+```bash
+curl -fsSL ... | bash -s -- --lib-dir ~/.fmriprep --bin-dir /opt/bin
+```
+
+Or clone and add to `PATH`:
+
+```bash
+git clone https://github.com/bbuchsbaum/rriscripts.git
+export PATH="$HOME/code/rriscripts/fmriprep:$PATH"
+```
+
+If `~/bin` is not on your `PATH`, add it to `~/.bashrc`:
+
+```bash
+export PATH="$HOME/bin:$PATH"
+```
+
+**Requirements:** Python 3.7+, SLURM, and Singularity/Apptainer or Docker.
+`questionary` (`pip install --user questionary`) is optional but improves the
+wizard UX.
+
+## Before You Run Anything
+
+You need three things on the cluster before the launcher can do useful work.
+These are one-time setup steps and are usually shared across a lab.
+
+### 1. An fMRIPrep container image
+
+Run this on a **login node** — compute nodes typically have no internet:
+
+```bash
+# Pick a version from https://hub.docker.com/r/nipreps/fmriprep/tags
+VERSION=24.1.0
+
+# Singularity (15-30 min):
+singularity build fmriprep_${VERSION}.sif docker://nipreps/fmriprep:${VERSION}
+# or with Apptainer:
+apptainer pull docker://nipreps/fmriprep:${VERSION}
+
+# Docker (local workstation):
+docker pull nipreps/fmriprep:${VERSION}
+```
+
+Put the `.sif` somewhere lab members can share:
+
+```bash
+mv fmriprep_${VERSION}.sif /project/def-piname/shared/bin/
+```
+
+You will set `container = /project/def-piname/shared/bin/fmriprep_24.1.0.sif`
+in your config below. (Docker users can skip the path — the launcher
+auto-discovers local Docker images.)
+
+### 2. A FreeSurfer license
+
+Get a free license at <https://surfer.nmr.mgh.harvard.edu/registration.html>
+and save it somewhere readable by your jobs, e.g.
+`/project/def-piname/shared/bin/license.txt`.
+
+### 3. A populated TemplateFlow cache
+
+fMRIPrep downloads brain templates via [TemplateFlow](https://www.templateflow.org/),
+which fails on air-gapped compute nodes. Pre-populate the cache **on a login
+node**:
+
+```bash
+# Option A — use the templateflow Python API:
+python -c "
+import templateflow.api as tfa
+tfa.get('MNI152NLin2009cAsym')
+tfa.get('MNI152NLin6Asym')
+tfa.get('fsaverage')
+tfa.get('fsLR')
+"
+
+# Option B — copy from someone who already has it:
+cp -r /project/shared/templateflow ~/.cache/templateflow
+```
+
+The launcher auto-binds your local cache into the container, sets
+`TEMPLATEFLOW_HOME` inside it, and validates that templates exist before
+generating the sbatch.
 
 ## Quick Start
 
-All examples below use `python3 fmriprep_launcher.py ...` for explicitness. If the script is executable and on your `PATH`, direct invocation also works:
+Once the prerequisites above are in place:
 
 ```bash
-./fmriprep_launcher.py probe
-./fmriprep_launcher.py slurm-array --help
+# 1. Confirm everything is detected:
+fmriprep_launcher.py probe
+
+# 2. Write a user-level config (once per cluster):
+fmriprep_launcher.py init --user
+$EDITOR ~/.config/fmriprep/config.ini   # set runtime, container, fs_license, account, ...
+
+# 3. Write a project config in your BIDS root:
+cd /path/to/my_bids_dataset
+fmriprep_launcher.py init
+$EDITOR fmriprep.ini                    # set bids, out, work, subjects, ...
+
+# 4. Verify and generate the sbatch:
+fmriprep_launcher.py wizard --quick
+
+# 5. Submit:
+sbatch fmriprep_job/fmriprep_array.sbatch
+
+# 6. If any subjects fail, rerun just those:
+fmriprep_launcher.py rerun-failed --manifest fmriprep_job/job_manifest.json
 ```
 
-### 1. Probe your environment
+What each step does is covered in [Subcommand Reference](#subcommand-reference)
+below.
 
-```bash
-python3 fmriprep_launcher.py probe
-```
-
-Shows detected runtimes (Singularity/Docker), available container images, FreeSurfer license location, and TemplateFlow status.
-
-### 2. Create config files
-
-First, create a **user-level config** with your cluster infrastructure (once):
-
-```bash
-python3 fmriprep_launcher.py init --user
-# Writes ~/.config/fmriprep/config.ini
-```
-
-Edit it to fill in your container path, FreeSurfer license, account name, etc.
-These values are shared across all projects.
-
-Then, for each dataset, create a **project config**:
-
-```bash
-cd /path/to/my_study
-python3 fmriprep_launcher.py init
-# Writes ./fmriprep.ini, pre-filled from your user config
-```
-
-The project config automatically picks up values from your user config, so you
-only need to set dataset-specific things (`bids`, `out`, `subjects`, etc.).
-
-Options:
-- `--user` — generate user-level config at `~/.config/fmriprep/config.ini`
-- `--force` — overwrite an existing config file
-- `init /path/to/dir` — write project config to a specific directory
-
-You can also copy the annotated example manually:
-
-```bash
-cp fmriprep.ini.example /path/to/my_study/fmriprep.ini
-```
-
-The launcher reads INI-format config files in priority order (later files
-override earlier ones):
+A complete annotated config is in `fmriprep.ini.example`. The launcher reads
+config files in priority order (later overrides earlier):
 
 1. `/etc/fmriprep/config.ini` (system-wide)
-2. `~/.config/fmriprep/config.ini` or `~/.fmriprep.ini` (user)
-3. `./fmriprep.ini` (project-specific — recommended)
+2. `~/.config/fmriprep/config.ini` or `~/.fmriprep.ini` (user — infrastructure)
+3. `./fmriprep.ini` (project — dataset-specific)
 4. `--config path/to/file.ini` (explicit override)
 
 The recommended split is:
 
-- **User config** (`~/.fmriprep.ini`): stable infrastructure — `runtime`,
-  `container`, `fs_license`, `templateflow_home`, `account`, `partition`.
-- **Project config** (`./fmriprep.ini`): dataset-specific — `bids`, `out`,
-  `work`, `subjects`, `output_spaces`, `job_name`, `log_dir`.
+- **User config** — stable infrastructure: `runtime`, `container`,
+  `fs_license`, `templateflow_home`, `account`, `partition`.
+- **Project config** — dataset-specific: `bids`, `out`, `work`, `subjects`,
+  `output_spaces`, `job_name`, `log_dir`.
 
-### 3. Express wizard for normal use
+## Subcommand Reference
+
+All subcommands accept `--help` for full options. Examples below assume the
+launcher is on `PATH`; otherwise prefix with `python3`.
+
+### `probe` — show what's detected
 
 ```bash
-cd /path/to/my_study
-python3 fmriprep_launcher.py wizard --quick
+fmriprep_launcher.py probe
 ```
 
-The quick wizard is the best default UX. It asks only for items that are still
-missing after config/environment discovery.
+Lists the runtime (Singularity/Apptainer/Docker), available container images,
+your FreeSurfer license, TemplateFlow cache status, and the effective merged
+config. Run this first to confirm prerequisites are in place.
 
-### 4. Full interactive wizard
+### `init` — generate a starter config
 
 ```bash
-python3 fmriprep_launcher.py wizard
+fmriprep_launcher.py init --user           # ~/.config/fmriprep/config.ini
+fmriprep_launcher.py init                  # ./fmriprep.ini in current dir
+fmriprep_launcher.py init /path/to/dataset # ./fmriprep.ini in a specific dir
+fmriprep_launcher.py init --force          # overwrite existing
 ```
 
-Walks through every option with defaults from config. Install `questionary` for a better experience:
+Project configs are pre-filled from the user config so you only need to set
+dataset-specific values.
+
+### `wizard` — interactive setup
 
 ```bash
-pip install --user questionary
+fmriprep_launcher.py wizard --quick    # express: only ask what's missing
+fmriprep_launcher.py wizard            # review-and-edit table of all values
 ```
 
-### 5. Direct CLI for scripted or repeat usage
+Both modes auto-discover defaults from your config and environment. `--quick`
+asks only for items the launcher can't infer; the default mode shows a numbered
+table of every value and lets you edit by field number.
+
+### `slurm-array` — write the sbatch directly
+
+For scripted or repeat runs, skip the wizard once your config is stable:
 
 ```bash
-# Generate SLURM array script:
-python3 fmriprep_launcher.py slurm-array \
+fmriprep_launcher.py slurm-array \
     --bids /path/to/BIDS \
     --out /path/to/BIDS/derivatives/fmriprep \
-    --work /scratch/fmriprep_work \
+    --work /scratch/$USER/fmriprep_work \
     --subjects all \
     --container /path/to/fmriprep.sif \
     --fs-license /path/to/license.txt \
     --partition compute --time 24:00:00 \
     --cpus-per-task 8 --mem 32G \
     --account rrg-mypi
+```
 
-# Print commands without submitting:
-python3 fmriprep_launcher.py print-cmd \
+Writes a complete bundle to `./fmriprep_job/`:
+
+- `fmriprep_array.sbatch` — the SLURM script
+- `subjects.txt` — one line per array task
+- `job_manifest.json` — config snapshot used by `rerun-failed`
+- `status/` — per-subject `.running`, `.ok`, `.failed` markers populated at runtime
+
+### `print-cmd` — print commands without submitting
+
+```bash
+fmriprep_launcher.py print-cmd \
     --bids /path/to/BIDS \
     --subjects sub-01 sub-02 \
     --container /path/to/fmriprep.sif \
@@ -145,26 +220,23 @@ python3 fmriprep_launcher.py print-cmd \
     --output-spaces "MNI152NLin2009cAsym:res-2 T1w"
 ```
 
-### 6. Rerun failed subjects from a previous job bundle
+Useful for inspecting exactly what will be invoked.
 
-Every `slurm-array` bundle writes:
-
-- `fmriprep_array.sbatch`
-- `subjects.txt`
-- `job_manifest.json`
-- `status/` containing per-subject `.running`, `.ok`, and `.failed` markers
-
-To generate a bundle containing only failed subjects:
+### `rerun-failed` — retry only the failed subjects
 
 ```bash
-python3 fmriprep_launcher.py rerun-failed \
+fmriprep_launcher.py rerun-failed \
     --manifest /path/to/fmriprep_job/job_manifest.json
 ```
+
+Reads the manifest and `status/` markers from a previous run and writes a new
+bundle (in `rerun_failed_job/` next to the manifest by default) containing only
+subjects with `.failed` markers. The original bundle is not mutated.
 
 Optional overrides:
 
 ```bash
-python3 fmriprep_launcher.py rerun-failed \
+fmriprep_launcher.py rerun-failed \
     --manifest /path/to/fmriprep_job/job_manifest.json \
     --status-dir /path/to/fmriprep_job/status \
     --script-outdir /path/to/fmriprep_rerun \
@@ -172,7 +244,14 @@ python3 fmriprep_launcher.py rerun-failed \
     --job-name fmriprep_retry
 ```
 
-This writes a rerun bundle without mutating the original one.
+### `tui` / `gui` — alternative frontends
+
+```bash
+fmriprep_launcher.py tui   # requires: pip install textual
+fmriprep_launcher.py gui   # requires Tk and an X11 display
+```
+
+Both wrap the same backend as the CLI; use whichever you prefer.
 
 ## Configuration File Reference
 
@@ -244,175 +323,58 @@ log_dir = /scratch/myuser/fmriprep_logs
 | `mail_type` | string | — | SLURM mail events (e.g. `END,FAIL`) |
 | `module_singularity` | bool | `false` | Insert `module load singularity` in the generated script |
 
-Boolean values are case-insensitive (`true`/`True`/`TRUE` all work). Inline
-comments use `#` (preferred) or `;`.
+Boolean values are case-insensitive (`true`/`True`/`TRUE`). Inline comments
+use `#` (preferred) or `;`.
 
-## TemplateFlow on Air-Gapped Compute Nodes
-
-Most HPC compute nodes have no internet access. fMRIPrep uses [TemplateFlow](https://www.templateflow.org/) to download brain templates, which will fail on air-gapped nodes.
-
-The launcher handles this automatically:
-
-1. **Binds your local TemplateFlow cache** into the container at `/opt/templateflow`
-2. **Sets `TEMPLATEFLOW_HOME`** inside the container (with correct Apptainer/Singularity prefix detection)
-3. **Validates** that your TemplateFlow directory actually contains templates before generating scripts
-
-**You must pre-populate the cache on a login node** (which has internet):
-
-```bash
-# Option A: Use the templateflow Python API
-python -c "
-import templateflow.api as tfa
-tfa.get('MNI152NLin2009cAsym')
-tfa.get('MNI152NLin6Asym')
-tfa.get('fsaverage')
-tfa.get('fsLR')
-"
-
-# Option B: Copy from someone who already has it
-cp -r /project/shared/templateflow ~/.cache/templateflow
-
-# Option C: Set a shared path in your config
-# templateflow_home = /project/rrg-mypi/shared/opt/templateflow
-```
-
-Configure the path via:
-- Config file: `templateflow_home = /path/to/templateflow`
-- Environment: `export TEMPLATEFLOW_HOME=/path/to/templateflow`
-- CLI flag: `--templateflow-home /path/to/templateflow`
-
-## Getting the Container Image
-
-fMRIPrep runs inside a container. You need to download or build the image once,
-then point your config at it.
-
-### Singularity / Apptainer (HPC clusters)
-
-Run this on a **login node** (compute nodes typically have no internet):
-
-```bash
-# Pick a version from https://hub.docker.com/r/nipreps/fmriprep/tags
-VERSION=24.1.0
-
-# Build the .sif file (may take 15-30 minutes)
-singularity build fmriprep_${VERSION}.sif docker://nipreps/fmriprep:${VERSION}
-# or with Apptainer:
-apptainer pull docker://nipreps/fmriprep:${VERSION}
-```
-
-Put the `.sif` file in a shared project directory so lab members can reuse it:
-
-```bash
-mv fmriprep_${VERSION}.sif /project/def-piname/shared/bin/
-```
-
-Then set it in your config:
-
-```ini
-container = /project/def-piname/shared/bin/fmriprep_24.1.0.sif
-```
-
-Or point `FMRIPREP_SIF_DIR` at the directory and use `container = auto`:
-
-```bash
-export FMRIPREP_SIF_DIR=/project/def-piname/shared/bin
-```
-
-### Docker (local workstation)
-
-```bash
-docker pull nipreps/fmriprep:24.1.0
-```
-
-The launcher auto-discovers local Docker images — no config path needed.
-
-### Checking the latest version
-
-The latest version is listed at
-[hub.docker.com/r/nipreps/fmriprep/tags](https://hub.docker.com/r/nipreps/fmriprep/tags)
-and [fmriprep.org/en/latest/changes.html](https://fmriprep.org/en/latest/changes.html).
-
-## Supported Runtimes
-
-| Runtime | Container type | Auto-detected via |
-|---|---|---|
-| **singularity** | `.sif` or `.simg` file | `command -v singularity \|\| command -v apptainer` |
-| **docker** | Docker image:tag | `command -v docker` |
-| **fmriprep-docker** | Docker image:tag | `command -v fmriprep-docker` |
-
-The launcher auto-detects the runtime and searches for containers in `$FMRIPREP_SIF_DIR` (Singularity) or local Docker images.
-
-## Cluster-Specific Notes
-
-### Trillium (whole-node scheduling)
-
-Trillium allocates entire nodes, so `--mem` in SLURM directives causes errors. Use:
-
-```bash
-# CLI:
-python3 fmriprep_launcher.py slurm-array ... --no-mem
-
-# Config:
-[slurm]
-no_mem = true
-
-# Wizard: select "n" when asked "Specify memory limit?"
-# GUI: leave the Memory field blank or type "none"
-```
-
-### Subject Batching
-
-For large datasets, batch multiple subjects per job to reduce SLURM overhead:
-
-```bash
-python3 fmriprep_launcher.py slurm-array ... --subjects-per-job 4
-```
-
-This creates array tasks where each runs 4 subjects in parallel via `xargs`. Resources are automatically scaled (4x nprocs, 4x memory).
-
-## Environment Variables
+### Environment variables
 
 | Variable | Effect |
 |---|---|
-| `FMRIPREP_SIF_DIR` | Directory to search for `.sif/.simg` container images. |
+| `FMRIPREP_SIF_DIR` | Directory to search for `.sif/.simg` images (used when `container = auto`). |
 | `FS_LICENSE` | Path to FreeSurfer license file (fallback if not in config). |
-| `TEMPLATEFLOW_HOME` | Path to TemplateFlow cache directory. |
+| `TEMPLATEFLOW_HOME` | Path to TemplateFlow cache directory (fallback if not in config). |
 
-## Installation
+## Cluster Notes
 
-Install all fmriprep launcher files to `~/.local/share/fmriprep` with entry
-point symlinks in `~/bin`:
+### Trillium (whole-node scheduling)
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/bbuchsbaum/rriscripts/main/fmriprep/install.sh | bash
+Trillium allocates entire nodes, so `--mem` in SLURM directives causes errors:
+
+```ini
+[slurm]
+no_mem = true
 ```
 
-This keeps `~/bin` clean — only `fmriprep_launcher.py` and
-`run_fmriprep_wizard.sh` are symlinked there; the Python modules they import
-live together in `~/.local/share/fmriprep/`.
+Equivalent CLI flag: `--no-mem`. In the wizard, answer "n" to "Specify memory
+limit?".
 
-To customize the directories:
+### Subject batching
 
-```bash
-curl -fsSL ... | bash -s -- --lib-dir ~/.fmriprep --bin-dir /opt/bin
-```
-
-Or clone the repo and add to your PATH:
+For large datasets, batch multiple subjects per array task to reduce SLURM
+overhead:
 
 ```bash
-git clone https://github.com/bbuchsbaum/rriscripts.git
-export PATH="$HOME/code/rriscripts/fmriprep:$PATH"
+fmriprep_launcher.py slurm-array ... --subjects-per-job 4
 ```
 
-## Requirements
+Each array task then runs 4 subjects in parallel via `xargs`, and the
+launcher scales `--nprocs` and `--mem` accordingly (4× per task).
 
-- **Python 3.7+**
-- **SLURM** (for job submission)
-- **Singularity/Apptainer or Docker** (for container execution)
-- **questionary** (optional, for improved wizard experience): `pip install --user questionary`
-- **textual** (optional, for the TUI): `pip install --user textual`
-- **Tk** (optional, for the GUI): usually available via `python3-tk` system package
+## What's in This Directory
 
-## Deprecated Features
+| File | Purpose |
+|---|---|
+| `fmriprep_launcher.py` | Main CLI entrypoint (subcommands listed above). |
+| `fmriprep_backend.py` | `BuildConfig`, command construction, SLURM template, manifest I/O. |
+| `fmriprep_shared.py` | INI loading, runtime detection, subject discovery, memory parsing. |
+| `fmriprep_tui_autocomplete.py` | Optional Textual TUI (`pip install textual`). |
+| `fmriprep_gui_tk.py` | Optional Tk GUI (needs Tk and X11). |
+| `fmriprep.ini.example` | Annotated example covering both user-level and project-level keys. |
+| `run_fmriprep_wizard.sh` | Convenience wrapper that activates a likely venv before launching the wizard. |
+| `install.sh` | One-shot installer. |
+| `tests/` | Unit tests (`python3 -m unittest tests.test_backend`). |
 
-- **ICA-AROMA** (`--use-aroma`): Removed from fMRIPrep >= 23.1.0. The launcher will warn if this option is selected.
+## Deprecated
+
+- **ICA-AROMA** (`--use-aroma`): Removed from fMRIPrep ≥ 23.1.0. The launcher
+  raises an error if this option is set.
