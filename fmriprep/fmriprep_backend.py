@@ -116,7 +116,7 @@ def build_fmriprep_command(cfg: BuildConfig, subjects: List[str] | str) -> List[
     templateflow_container = "/opt/templateflow"
 
     if cfg.container_runtime == "singularity":
-        singularity_bin = "singularity" if which("singularity") else "apptainer"
+        singularity_bin = "apptainer" if which("apptainer") else "singularity"
         cmd = [
             singularity_bin,
             "run",
@@ -132,7 +132,7 @@ def build_fmriprep_command(cfg: BuildConfig, subjects: List[str] | str) -> List[
         ]
         if templateflow_host:
             cmd += ["-B", f"{templateflow_host}:{templateflow_container}"]
-            env_prefix = "SINGULARITYENV" if singularity_bin == "singularity" else "APPTAINERENV"
+            env_prefix = "APPTAINERENV" if singularity_bin == "apptainer" else "SINGULARITYENV"
             cmd = [f"{env_prefix}_TEMPLATEFLOW_HOME={templateflow_container}"] + cmd
         cmd += [
             cfg.container,
@@ -284,8 +284,12 @@ else
 fi
 
 if [[ "$RUNTIME" == "singularity" ]]; then
-  RT_BIN=$(command -v singularity || command -v apptainer)
-  if [[ "$RT_BIN" == *"apptainer"* ]]; then
+  # Prefer apptainer when present; fall back to singularity. Detect which one
+  # is actually in use via --version output, since `singularity` is often a
+  # symlink to apptainer (e.g. on Trillium) and a path-string check would
+  # incorrectly pick the SINGULARITYENV_* prefix.
+  RT_BIN=$(command -v apptainer || command -v singularity)
+  if "$RT_BIN" --version 2>/dev/null | grep -qi apptainer; then
     ENV_PREFIX="APPTAINERENV"
   else
     ENV_PREFIX="SINGULARITYENV"
@@ -296,8 +300,8 @@ if [[ "$RUNTIME" == "singularity" ]]; then
   fi
   mkdir -p "$WORK_DIR/.matplotlib" "$WORK_DIR/.cache"
   export ${{ENV_PREFIX}}_MPLCONFIGDIR=/work/.matplotlib
-  export ${{ENV_PREFIX}}_HOME=/work/.home
   export ${{ENV_PREFIX}}_NUMEXPR_MAX_THREADS=$OMP_THREADS
+  # HOME is set via --home flag below; Apptainer rejects ${{ENV_PREFIX}}_HOME.
 
   run_subject() {{
     local SUBJECT_ID="${{1#sub-}}"
