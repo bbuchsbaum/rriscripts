@@ -1,145 +1,132 @@
-# qexec — SLURM Job Submission Toolkit
+# qexec - SLURM Job Submission Toolkit
 
-A suite of shell scripts for submitting and managing jobs on SLURM clusters. Designed for researchers who need to run many parameterized commands (e.g., neuroimaging pipelines, simulations, R batch jobs) across cluster nodes with minimal boilerplate.
+`qexec` is a small set of shell tools for submitting and monitoring SLURM jobs. It covers single commands, interactive sessions, generated command grids, prewritten command files, packed single-node runs, and lightweight job monitoring.
 
-## Scripts at a Glance
+## Tools
 
-### Core Pipeline
-
-| Script | What it does |
+| Script | Purpose |
 |---|---|
-| **cmd_expand.sh** | Expands a parameterized command into a list of concrete commands via Cartesian product or positional zip. Pure text transformation — no SLURM dependency. |
-| **qexec.sh** | Submits jobs to SLURM: `salloc` for interactive sessions, `sbatch` for batch jobs, one-command-per-task command files, and packed single-node command files via `--file ... --pack N`. Handles time, memory, CPUs, array indices, logging, and OpenMP threading. The parser is portable across BSD/macOS/Linux shells and supports both `--flag value` and `--flag=value` forms. |
-| **command_distributor.sh** | Runs inside a SLURM array task. Splits a command file into batches by `SLURM_ARRAY_TASK_ID` and executes its share via GNU Parallel. |
-| **batch_exec.sh** | Orchestrator that ties the above together: expands commands with `cmd_expand.sh`, then submits them as a SLURM array job that uses `command_distributor.sh` to distribute work across nodes. |
+| `qexec.sh` | Main SLURM launcher. Submits batch jobs with `sbatch`, interactive jobs with `salloc`, command files as arrays, and packed command files with a fixed concurrency cap. |
+| `cmd_expand.sh` | Expands bracket expressions into concrete command lines. Use it to generate command files or pipe commands into `send_slurm.sh`. |
+| `batch_exec.sh` | Expands a parameterized command with `cmd_expand.sh`, then submits the generated commands as a SLURM array job using `command_distributor.sh`. |
+| `bexec.sh` | Submits an existing command file as a batched SLURM array job using `command_distributor.sh`. |
+| `command_distributor.sh` | Runs inside a SLURM array task, selects that task's slice of a command file, and executes the slice with GNU Parallel. |
+| `send_slurm.sh` | Reads commands from stdin, persists them under `.qexec-state` or `--state-dir`, and submits them as one command per SLURM array task or as packed batches with `--pack`. |
+| `rjobtop.py` | Shows live CPU and memory use for a running SLURM job. |
+| `slurm_job_monitor.sh` | Polls SLURM jobs until completion and reports efficiency with `seff` when available. |
+| `qexec_gui.tcl` | Tcl/Tk GUI for `qexec.sh`. |
+| `batch_exec_gui.tcl` | Tcl/Tk GUI for `batch_exec.sh`. |
+| `batch_exec_gui` | Convenience launcher for `batch_exec_gui.tcl`. |
 
-### Additional Tools
+## Common Workflows
 
-| Script | What it does |
-|---|---|
-| **bexec.sh** | File-oriented batch submitter. Takes a pre-written command file (`-f commands.txt`) and submits it as an array job via `qexec.sh` + `command_distributor.sh`. Use this when you already have a commands file; use `batch_exec.sh` when you want expansion + submission in one step. |
-| **send_slurm.sh** | Pipe-friendly interface: reads commands from stdin, persists the generated command list/runner under `.qexec-state` (or `--state-dir`), and submits them as a SLURM array job. Useful with `cmd_expand.sh \| send_slurm.sh`. |
-| **rjobtop.py** | Live monitoring of a running SLURM job's CPU and memory utilization. Shows per-process breakdown, fork rate, and ASCII sparklines. Useful for R/future/callr workloads. |
-| **slurm_job_monitor.sh** | Polls SLURM jobs until completion, then reports efficiency via `seff`. Optional email or desktop notifications. |
-
-### GUIs
-
-Both GUIs include input validation, tooltips on every field, a scrollable output pane for viewing results, and confirmation dialogs before real submissions. They require Tcl/Tk (`wish`).
-
-| Script | What it does |
-|---|---|
-| **qexec_gui.tcl** | GUI for `qexec.sh` — fill in fields, submit batch or interactive jobs, and see dry-run output in the built-in output pane. |
-| **batch_exec_gui.tcl** | GUI for `batch_exec.sh` — configure expansions, use the "Preview Expansion" button to see expanded commands before submitting, and build bracket expressions with the argument helper. |
-| **batch_exec_gui** | Convenience launcher for `batch_exec_gui.tcl`. |
-
-### Haskell Implementations
-
-`qexec.hs`, `cmd_expand.hs`, `bexec.hs`, and `command_distributor.hs` are Haskell implementations of the corresponding shell scripts. They are functionally equivalent and can be compiled as standalone binaries if preferred.
-
-## How the Scripts Work Together
-
-The typical workflow for running many parameterized jobs:
-
-```
-Option A: All-in-one (batch_exec.sh)
-
-  batch_exec.sh "cmd [1..100] [a,b]"
-    1. Calls cmd_expand.sh → expands to N commands
-    2. Writes commands to a file
-    3. Submits via qexec.sh --array=1-K
-            |
-            v
-      command_distributor.sh (runs on each node)
-        Splits commands among K nodes
-        Executes its share via GNU Parallel
-
-Option B: Pre-made command file → batched across nodes (bexec.sh)
-
-  cmd_expand.sh "cmd [1..100]" > commands.txt   # or write by hand
-  bexec.sh -f commands.txt -n 5
-    Submits via qexec.sh → command_distributor.sh (same as above)
-
-Option C: Pre-made command file → one task per command (qexec.sh --file)
-
-  qexec.sh --file commands.txt
-    Submits sbatch --array=1-N (one SLURM task per line)
-    Each task runs exactly one command — no GNU Parallel
-
-Option D: Pre-made command file → packed onto one node (qexec.sh --file --pack)
-
-  qexec.sh --file commands.txt --pack 5
-    Submits one Slurm array task
-    Runs commands.txt through command_distributor.sh + GNU Parallel
-    Keeps at most 5 commands running at one time
-```
-
-Use **A** or **B** when you have many commands and want to batch them onto
-fewer nodes. Use **C** when each command needs its own dedicated SLURM task
-(e.g. long-running jobs that each need full node resources). Use **D** for a
-single-node pack, such as several short one-core commands sharing one
-allocation.
-
-### Example: Run an R script over 100 subjects on 5 nodes
+### Run One Batch Command
 
 ```bash
-# batch_exec.sh does the expansion + submission in one step:
-batch_exec.sh -t 2 -n 5 --ncpus 40 -m 16G -- \
+qexec.sh --time 4 --ncpus 8 --mem 32G --account mylab -- Rscript run.R
+```
+
+`qexec.sh` accepts both `--flag value` and `--flag=value` forms:
+
+```bash
+qexec.sh --time=4 --ncpus=8 --mem=32G --account=mylab -- Rscript run.R
+```
+
+### Start An Interactive Session
+
+```bash
+qexec.sh --interactive --time 4 --ncpus 8 --mem 32G
+```
+
+Add `--nox11` if the cluster or session should not request X11 forwarding.
+
+### Run One Command Per Array Task
+
+Create a command file with one command per nonblank line:
+
+```text
+sleep 60
+sleep 30
+sleep 25
+```
+
+Submit it as a SLURM array, one command per task:
+
+```bash
+qexec.sh --file commands.txt --time 1 --ncpus 1
+```
+
+This submits `--array=1-N`, where `N` is the number of nonblank command lines.
+
+### Pack Commands Onto One Node
+
+To run commands from a file on a single node with no more than 5 commands active at once:
+
+```bash
+qexec.sh --file commands.txt --pack 5 --time 1 --ncpus 5
+```
+
+Pack mode submits one SLURM task and runs the command file through `command_distributor.sh` with GNU Parallel capped at the requested pack size. If `--ncpus` is not provided and qexec would otherwise request one CPU, `qexec.sh` sets `--ncpus` to the pack size.
+
+### Batch A Command File Across Several Array Tasks
+
+Use `bexec.sh` when you already have a command file and want to split it across several SLURM array tasks:
+
+```bash
+bexec.sh --file commands.txt --nodes 4 --jobs 10 --ncpus 40 --time 3
+```
+
+This creates a 4-task array. Each array task receives a slice of `commands.txt` and runs up to 10 commands at a time.
+
+### Generate And Submit A Command Grid
+
+Use `batch_exec.sh` when command lines can be generated from bracket expressions:
+
+```bash
+batch_exec.sh --time 2 --nodes 5 --ncpus 40 --mem 16G --jobs 40 -- \
     Rscript analyze.R --sub [1..100] --method [lasso,ridge]
-
-# This expands to 200 commands (100 subjects x 2 methods),
-# submits a 5-element array job, each node runs ~40 commands
-# in parallel via GNU Parallel.
 ```
 
-### Example: Expand commands, review, then submit separately
+This expands to 200 commands, submits a 5-task SLURM array, and runs each task's slice with GNU Parallel.
+
+### Generate, Review, Then Submit
 
 ```bash
-# Step 1: Generate the command list
 cmd_expand.sh Rscript run.R --sub [1..50] --roi [V1,MT,FFA] > commands.txt
+cat commands.txt
+bexec.sh --file commands.txt --nodes 4 --jobs 10 --ncpus 40 --time 3
+```
 
-# Step 2: Review
-cat commands.txt   # 150 commands (50 x 3)
+For a single-node packed run from the same file:
 
-# Step 3: Submit with the older bexec interface
-bexec.sh -f commands.txt -n 4 --ncpus 40 --time 3
-
-# Or pack a hand-written command file onto one node, 5 commands at a time:
+```bash
 qexec.sh --file commands.txt --pack 5 --ncpus 5 --time 1
-
-# Or pipe directly:
-cmd_expand.sh prog [1..50] | send_slurm.sh -t 2 -n 4 --ncpus 8
 ```
 
-### Example: Interactive session
+### Pipe Commands Into SLURM
 
 ```bash
-qexec.sh -i -t 4 -n 8 -m 32G
-# Allocates an interactive session with 8 CPUs, 32G RAM, 4 hours
+cmd_expand.sh prog [1..50] | send_slurm.sh --time 2 --ncpus 8
 ```
 
-### Example: Equals-style long options
+`send_slurm.sh` stores the generated commands and a runner script under `.qexec-state` by default so the submitted job can read them after the shell pipeline exits.
+
+To split piped commands across 5 packed array tasks, with at most 3 commands running at once in each task:
 
 ```bash
-qexec.sh --dry-run --time=4 --ncpus=8 --account=mylab --array=1-10 -- myscript.sh
+cmd_expand.sh command.sh [1..10] | send_slurm.sh --nodes 5 --pack 3 --time 1
 ```
 
-This is equivalent to:
+In pack mode, `--nodes` is the number of packed array tasks and `--pack` is the per-task command concurrency cap. If `--ncpus` is not provided and `send_slurm.sh` would otherwise request one CPU, it sets `--ncpus` to the pack size.
+
+### Monitor Jobs
 
 ```bash
-qexec.sh --dry-run --time 4 --ncpus 8 --account mylab --array 1-10 -- myscript.sh
-```
-
-### Example: Monitor a running job
-
-```bash
-# On the compute node:
 rjobtop.py --job 123456
-
-# From the login node, poll until done:
 slurm_job_monitor.sh 123456 123457
 ```
 
-## cmd_expand.sh — Value Syntax
+## `cmd_expand.sh` Value Syntax
 
 Values inside `[]` are expanded:
 
@@ -147,43 +134,65 @@ Values inside `[]` are expanded:
 |---|---|---|
 | Comma list | `[a,b,c]` | `a`, `b`, `c` |
 | Integer range | `[1..5]` or `[1:5]` | `1`, `2`, `3`, `4`, `5` |
-| File lines | `[file:subjects.txt]` | One value per non-blank line |
+| File lines | `[file:subjects.txt]` | One value per nonblank line |
 | CSV column | `[df:subject:data.csv]` | Values from column `subject` |
 | Glob | `[glob:data/*.nii]` | Matching file paths |
 
-**Modes:**
-- Default: Cartesian product of all expanded values.
-- `--link`: Zip arguments by position (shorter lists repeat their last value).
+Modes:
 
-**Output:**
-- `--json`: Emit commands as a JSON array.
-- `--quote`: Shell-quote all tokens.
+- Default mode computes the Cartesian product of all expanded values.
+- `--link` zips expanded values by position. Shorter lists repeat their last value.
+
+Output options:
+
+- `--json` emits commands as a JSON array.
+- `--quote` shell-quotes expanded tokens.
+
+## Main `qexec.sh` Options
+
+| Option | Effect |
+|---|---|
+| `--time`, `-t` | Wall time. Bare numbers are hours; suffixes such as `30m` and `1hr` are accepted. |
+| `--ncpus`, `-n` | CPUs per task. |
+| `--nodes` | Nodes per task. |
+| `--mem`, `-m` | Memory request. |
+| `--no-mem` | Do not pass `--mem` to SLURM. |
+| `--name`, `-j` | SLURM job name. |
+| `--array`, `-a` | SLURM array range, including throttles such as `1-100%10`. |
+| `--file` | Command file, one nonblank command per line. |
+| `--pack` | With `--file`, run all commands in one SLURM task with this many concurrent commands. |
+| `--account` | SLURM account. |
+| `--omp_num_threads`, `-o` | Sets `OMP_NUM_THREADS` and `MKL_NUM_THREADS`. |
+| `--log-dir`, `-l` | Directory for SLURM stdout and stderr files. |
+| `--after` | Submit with `sbatch --dependency=afterok:JOBID`. |
+| `--wait`, `-w` | Wait for a submitted batch job and show efficiency stats. |
+| `--dry-run`, `-d` | Print the computed submission command and job script without submitting. |
 
 ## Installation
 
 ### Prerequisites
 
-- **bash** 4.0+ (for arrays and `mapfile`)
-- **Python 3.7+** (used by `cmd_expand.sh` internally, and by `rjobtop.py`)
-- **GNU Parallel** (used by `command_distributor.sh` to run commands concurrently)
-- **SLURM** (the cluster must run SLURM for job submission)
-- **Tcl/Tk** (`wish`) — only needed for the GUI tools
+- Bash 3.2+
+- Python 3.7+
+- SLURM commands such as `sbatch`, `salloc`, and `squeue`
+- GNU Parallel for packed and batched command-file execution
+- Tcl/Tk `wish` for the GUI tools
 
-On most HPC clusters, Python 3, bash, and SLURM are already available. GNU Parallel may need to be loaded:
+On many clusters, GNU Parallel is provided through the module system:
 
 ```bash
-module load parallel    # cluster-specific; check 'module avail'
+module load parallel
 ```
 
 ### Quick Install
 
-Download all qexec scripts to `~/bin` in one command:
+Install the command-line tools to `~/bin`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/bbuchsbaum/rriscripts/main/qexec/install.sh | bash
 ```
 
-To install to a different directory:
+Install to a different directory:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/bbuchsbaum/rriscripts/main/qexec/install.sh | bash -s -- --prefix /opt/bin
@@ -191,53 +200,33 @@ curl -fsSL https://raw.githubusercontent.com/bbuchsbaum/rriscripts/main/qexec/in
 
 ### Manual Setup
 
-1. **Clone the repo:**
-
-   ```bash
-   git clone https://github.com/bbuchsbaum/rriscripts.git
-   ```
-
-2. **Add to your PATH** (in `~/.bashrc` or `~/.bash_profile`):
-
-   ```bash
-   export PATH="$HOME/code/rriscripts/qexec:$PATH"
-   ```
-
-3. **Verify:**
-
-   ```bash
-   qexec.sh --help
-   cmd_expand.sh --help
-   batch_exec.sh --help
-   ```
-
-### Optional: Compile Haskell Versions
-
-If you prefer compiled binaries (no Python/bash dependency for the core tools):
-
 ```bash
-# Requires GHC
-ghc -O2 -o cmd_expand qexec/cmd_expand.hs
-ghc -O2 -o qexec qexec/qexec.hs
+git clone https://github.com/bbuchsbaum/rriscripts.git
+export PATH="$HOME/code/rriscripts/qexec:$PATH"
+qexec.sh --help
+cmd_expand.sh --help
+batch_exec.sh --help
 ```
 
-### Environment Variables
+## Environment Variables
 
 | Variable | Effect |
 |---|---|
-| `QEXEC_DEFAULT_MEM` | Default memory request for `qexec.sh` (e.g., `4G`). |
-| `QEXEC_DISABLE_MEM` | Set to any value to suppress `--mem` entirely (useful for whole-node scheduling). |
-| `QEXEC_LOG_DIR` | Default directory for SLURM log files. |
+| `QEXEC_DEFAULT_ACCOUNT` | Default SLURM account for `qexec.sh`. |
+| `QEXEC_DEFAULT_MEM` | Default memory request for `qexec.sh`, such as `4G`. |
+| `QEXEC_DISABLE_MEM` | Suppress `--mem` entirely, useful for whole-node scheduling. |
+| `QEXEC_LOG_DIR` | Default directory for SLURM stdout and stderr files. |
+| `QEXEC_STATE_DIR` | Default state directory for `send_slurm.sh`. |
+| `QEXEC_PARALLEL_BIN` | GNU Parallel executable used by `command_distributor.sh`. |
+| `QEXEC_CONFIG` | Path to qexec config file. Defaults to `~/.qexecrc`. |
+| `CC_CLUSTER` | Override cluster auto-detection for cluster-specific defaults. |
 
-## Running Tests
+## Tests
 
-Tests use [bats-core](https://github.com/bats-core/bats-core):
+Tests use [bats-core](https://github.com/bats-core/bats-core). They do not require SLURM because they use dry-runs and mocks.
 
 ```bash
-# Install bats (one-time)
 git clone https://github.com/bats-core/bats-core.git /tmp/bats-core
-
-# Run all tests (no SLURM required — uses --dry-run and mocks)
 PATH="/tmp/bats-core/bin:$PATH" bats qexec/tests/
 ```
 

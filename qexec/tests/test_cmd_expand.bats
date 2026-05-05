@@ -169,6 +169,33 @@ teardown() {
     [ "${#lines[@]}" -eq 2 ]
 }
 
+@test "warns when bare command matches local executable" {
+    printf '#!/bin/sh\nexit 0\n' > "$TMPDIR/local_cmd.sh"
+    chmod +x "$TMPDIR/local_cmd.sh"
+
+    run bash -c "cd '$TMPDIR' && '$CMD_EXPAND' local_cmd.sh [1,2] 2>'$TMPDIR/stderr.txt'"
+
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 2 ]
+    [ "${lines[0]}" = "local_cmd.sh 1" ]
+    [ "${lines[1]}" = "local_cmd.sh 2" ]
+    stderr="$(cat "$TMPDIR/stderr.txt")"
+    [[ "$stderr" == *"Warning: './local_cmd.sh' exists and is executable"* ]]
+}
+
+@test "does not warn when command includes explicit local path" {
+    printf '#!/bin/sh\nexit 0\n' > "$TMPDIR/local_cmd.sh"
+    chmod +x "$TMPDIR/local_cmd.sh"
+
+    run bash -c "cd '$TMPDIR' && '$CMD_EXPAND' ./local_cmd.sh [1] 2>'$TMPDIR/stderr.txt'"
+
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 1 ]
+    [ "${lines[0]}" = "./local_cmd.sh 1" ]
+    stderr="$(cat "$TMPDIR/stderr.txt")"
+    [ -z "$stderr" ]
+}
+
 # ── Error cases ────────────────────────────────────────────────────
 
 @test "no base command fails" {
@@ -180,4 +207,6 @@ teardown() {
     run "$CMD_EXPAND" --help
     [ "$status" -eq 0 ]
     [[ "$output" == *"Usage"* ]]
+    [[ "$output" == *"Examples:"* ]]
+    [[ "$output" == *"cmd_expand.sh Rscript run.R --sub [1..3]"* ]]
 }

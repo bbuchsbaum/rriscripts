@@ -3,8 +3,8 @@ set -euo pipefail
 
 # send_slurm.sh
 # Read commands from stdin and submit them as a Slurm array job via qexec.sh.
-# Unlike the older implementation, the command list and runner script are written
-# to a persistent directory so the submitted array job can still read them later.
+# The command list and runner script are written to a persistent directory so
+# the submitted array job can still read them later.
 #
 # Usage:
 #   cmd_expand.sh ... | send_slurm.sh [options]
@@ -13,7 +13,9 @@ set -euo pipefail
 #   -t, --time HOURS        Hours per task (default: 1)
 #   -m, --mem MEM           Memory per task
 #   -n, --ncpus N           CPUs per task (default: 1)
-#       --nodes N           Nodes per array task (default: 1)
+#       --nodes N           Nodes per array task; with --pack, number of batches
+#       --pack N            Split stdin across --nodes array tasks and run up to
+#                           N commands concurrently per task
 #   -j, --name NAME         Slurm job name (default: array_job)
 #   -a, --array SPEC        Override array indices (default: 1-N for N input commands)
 #       --account NAME      Slurm account (default: rrg-brad)
@@ -25,7 +27,7 @@ set -euo pipefail
 #   -h, --help              Show this help
 
 usage() {
-    sed -n '1,24p' "$0"
+    sed -n '1,27p' "$0"
     exit 1
 }
 
@@ -49,11 +51,14 @@ find_script() {
 }
 
 QEXEC_PATH="$(find_script qexec.sh)"
+CMD_DIST_PATH=""
 
 TIME=1
 MEM=""
 NCPUS=1
+NCPUS_WAS_SET=false
 NODES=1
+PACK=""
 JOB_NAME="array_job"
 ARRAY=""
 ACCOUNT="rrg-brad"
@@ -67,8 +72,9 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         -t|--time)            TIME="${2:-}"; shift 2 ;;
         -m|--mem)             MEM="${2:-}"; shift 2 ;;
-        -n|--ncpus)           NCPUS="${2:-}"; shift 2 ;;
+        -n|--ncpus)           NCPUS="${2:-}"; NCPUS_WAS_SET=true; shift 2 ;;
         --nodes)              NODES="${2:-}"; shift 2 ;;
+        --pack)               PACK="${2:-}"; shift 2 ;;
         -j|--name)            JOB_NAME="${2:-}"; shift 2 ;;
         -a|--array)           ARRAY="${2:-}"; shift 2 ;;
         --account)            ACCOUNT="${2:-}"; shift 2 ;;
@@ -96,6 +102,16 @@ do
     fi
 done
 
+if [[ -n "$PACK" ]] && ! [[ "$PACK" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Error: --pack must be a positive integer." >&2
+    exit 1
+fi
+
+if [[ -n "$PACK" && -n "$ARRAY" ]]; then
+    echo "Error: --array cannot be used with --pack; use --nodes to set the number of packed batches." >&2
+    exit 1
+fi
+
 if [[ -n "$MEM" ]]; then
     upper_mem="$(printf '%s' "$MEM" | tr '[:lower:]' '[:upper:]')"
     if ! [[ "$upper_mem" =~ ^[0-9]+[KMGTP]$ ]]; then
@@ -108,7 +124,10 @@ mkdir -p "$STATE_DIR"
 
 timestamp="$(date +%Y%m%d-%H%M%S)"
 COMMANDS_FILE="$(mktemp "$STATE_DIR/${JOB_NAME}.commands.${timestamp}.XXXXXX")"
-RUNNER_SCRIPT="$(mktemp "$STATE_DIR/${JOB_NAME}.runner.${timestamp}.XXXXXX")"
+RUNNER_SCRIPT=""
+if [[ -z "$PACK" ]]; then
+    RUNNER_SCRIPT="$(mktemp "$STATE_DIR/${JOB_NAME}.runner.${timestamp}.XXXXXX")"
+fi
 
 while IFS= read -r line; do
     [[ -z "${line//[[:space:]]/}" ]] && continue
@@ -117,17 +136,25 @@ done
 
 NUM_COMMANDS="$(wc -l < "$COMMANDS_FILE" | xargs)"
 if [[ -z "$NUM_COMMANDS" || "$NUM_COMMANDS" -eq 0 ]]; then
-    rm -f "$COMMANDS_FILE" "$RUNNER_SCRIPT"
+    rm -f "$COMMANDS_FILE"
+    [[ -n "$RUNNER_SCRIPT" ]] && rm -f "$RUNNER_SCRIPT"
     echo "Error: No commands provided on stdin." >&2
     exit 1
 fi
 
-if [[ -z "$ARRAY" ]]; then
+if [[ -n "$PACK" ]]; then
+    CMD_DIST_PATH="$(find_script command_distributor.sh)"
+    ARRAY="1-${NODES}"
+    if [[ "$NCPUS_WAS_SET" == false && "$NCPUS" -eq 1 ]]; then
+        NCPUS="$PACK"
+    fi
+elif [[ -z "$ARRAY" ]]; then
     ARRAY="1-${NUM_COMMANDS}"
 fi
 
-commands_file_quoted="$(printf '%q' "$COMMANDS_FILE")"
-cat > "$RUNNER_SCRIPT" <<EOF
+if [[ -z "$PACK" ]]; then
+    commands_file_quoted="$(printf '%q' "$COMMANDS_FILE")"
+    cat > "$RUNNER_SCRIPT" <<EOF
 #!/bin/bash
 set -euo pipefail
 COMMANDS_FILE=${commands_file_quoted}
@@ -140,18 +167,34 @@ fi
 echo "Executing[\${TASK_ID}]: \$COMMAND"
 exec bash -lc "\$COMMAND"
 EOF
-chmod +x "$RUNNER_SCRIPT"
+    chmod +x "$RUNNER_SCRIPT"
+fi
 
-qexec_cmd=( "$QEXEC_PATH" "--time" "$TIME" "--ncpus" "$NCPUS" "--nodes" "$NODES" "--name" "$JOB_NAME" "--array=$ARRAY" "--account" "$ACCOUNT" "--omp_num_threads" "$OMP_NUM_THREADS" )
+qexec_nodes="$NODES"
+if [[ -n "$PACK" ]]; then
+    qexec_nodes=1
+fi
+
+qexec_cmd=( "$QEXEC_PATH" "--time" "$TIME" "--ncpus" "$NCPUS" "--nodes" "$qexec_nodes" "--name" "$JOB_NAME" "--array=$ARRAY" "--account" "$ACCOUNT" "--omp_num_threads" "$OMP_NUM_THREADS" )
 [[ -n "$MEM" ]] && qexec_cmd+=( "--mem" "$MEM" )
 [[ "$NOX11" == true ]] && qexec_cmd+=( "--nox11" )
 [[ -n "$LOG_DIR" ]] && qexec_cmd+=( "--log-dir" "$LOG_DIR" )
 [[ "$DRY_RUN" == true ]] && qexec_cmd+=( "--dry-run" )
-qexec_cmd+=( "--" "$RUNNER_SCRIPT" )
+if [[ -n "$PACK" ]]; then
+    qexec_cmd+=( "--" "$CMD_DIST_PATH" "$COMMANDS_FILE" "$NODES" "$PACK" )
+else
+    qexec_cmd+=( "--" "$RUNNER_SCRIPT" )
+fi
 
 echo "Persisted commands file: $COMMANDS_FILE"
-echo "Persisted runner script: $RUNNER_SCRIPT"
-echo "Submitting $NUM_COMMANDS command(s) with:"
+if [[ -n "$RUNNER_SCRIPT" ]]; then
+    echo "Persisted runner script: $RUNNER_SCRIPT"
+fi
+if [[ -n "$PACK" ]]; then
+    echo "Submitting $NUM_COMMANDS command(s) across $NODES packed batch(es), up to $PACK concurrent command(s) per batch with:"
+else
+    echo "Submitting $NUM_COMMANDS command(s) with:"
+fi
 printf '  %q' "${qexec_cmd[@]}"
 printf '\n'
 

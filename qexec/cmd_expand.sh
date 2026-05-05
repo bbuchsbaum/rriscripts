@@ -45,7 +45,27 @@ Value syntax (inside []):
   N..M or N:M    Inclusive integer range
   file:<path>    Lines from file (trimmed, blanks dropped)
   df:<col>:<csv> CSV column by header name
-  glob:<pattern> Glob pattern (* and ?)"""
+  glob:<pattern> Glob pattern (* and ?)
+
+Examples:
+  cmd_expand.sh Rscript run.R --sub [1..3]
+      -> Rscript run.R --sub 1
+      -> Rscript run.R --sub 2
+      -> Rscript run.R --sub 3
+
+  cmd_expand.sh prog --sub [1,2] --roi [V1,MT]
+      -> prog --sub 1 --roi V1
+      -> prog --sub 1 --roi MT
+      -> prog --sub 2 --roi V1
+      -> prog --sub 2 --roi MT
+
+  cmd_expand.sh --link prog --sub [1,2,3] --roi [V1,MT]
+      -> prog --sub 1 --roi V1
+      -> prog --sub 2 --roi MT
+      -> prog --sub 3 --roi MT
+
+  cmd_expand.sh --quote prog --input [file:subjects.txt] --atlas [AAL,Schaefer]
+  cmd_expand.sh prog --sub [df:subject:data.csv] --img [glob:data/*.nii]"""
 
 def die(msg: str):
     sys.stderr.write(f"Error: {msg}\n")
@@ -212,8 +232,25 @@ def parse_top_level(argv):
         die("One of the provided arguments expanded to zero values.")
     return mode, json_out, quote_out, base, all_args
 
+def warn_if_local_executable_needs_dot_slash(base: str):
+    if os.sep in base or (os.altsep and os.altsep in base):
+        return
+    if any(ch.isspace() for ch in base):
+        return
+    if not base:
+        return
+
+    local_path = os.path.join(".", base)
+    if os.path.isfile(local_path) and os.access(local_path, os.X_OK):
+        sys.stderr.write(
+            f"Warning: './{base}' exists and is executable, but you used '{base}'. "
+            "Batch shells do not search the current directory unless '.' is in PATH. "
+            f"Use './{base}' if you intend to run the local script.\n"
+        )
+
 def main():
     mode, json_out, quote_out, base, args = parse_top_level(sys.argv[1:])
+    warn_if_local_executable_needs_dot_slash(base)
     if mode == "link":
         tokens_list = linked(args)
     else:
