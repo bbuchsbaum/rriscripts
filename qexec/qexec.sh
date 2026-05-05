@@ -26,6 +26,9 @@ set -euo pipefail
 #       --preset NAME      Load a named resource preset (e.g., fmriprep, freesurfer).
 #       --after JOBID      Run after JOBID completes (adds --dependency=afterok:JOBID).
 #   -w, --wait             Wait for the job to finish and show efficiency stats.
+#       --file FILE        Alias for --cmd-file.
+#       --pack N           With --file/--cmd-file, run all commands in one
+#                          Slurm task with at most N commands at a time.
 #
 # Configuration:
 #   ~/.qexecrc             Optional config file sourced before arg parsing.
@@ -40,6 +43,7 @@ TIME=1
 INTERACTIVE=false
 MEM="${QEXEC_DEFAULT_MEM:-}"
 NCPUS=1
+NCPUS_WAS_SET=false
 NODES=1
 JOB_NAME=""
 ARRAY=""
@@ -50,6 +54,7 @@ LOG_DIR="${QEXEC_LOG_DIR:-}"
 DRY_RUN=false
 NO_MEM=false
 CMD_FILE=""
+PACK=""
 AFTER=""
 PRESET=""
 WAIT=false
@@ -132,6 +137,8 @@ usage() {
     echo "  -o, --omp_num_threads  Number of OpenMP threads (default: 1)."
     echo "      --no-mem           Do not pass --mem to Slurm (overrides -m/--mem)."
     echo "      --cmd-file FILE    Read commands from FILE and submit as an array job."
+    echo "      --file FILE        Alias for --cmd-file."
+    echo "      --pack N           With --file, run commands in one Slurm task, N at a time."
     echo "      --preset NAME      Load resource preset (fmriprep, freesurfer, mriqc, light, heavy)."
     echo "      --after JOBID      Run after JOBID completes (sbatch --dependency=afterok:JOBID)."
     echo "  -w, --wait             Wait for the job to finish and show efficiency stats."
@@ -155,6 +162,26 @@ require_value() {
         echo "Error: ${flag} requires a value." >&2
         usage
     fi
+}
+
+_qexec_find_helper() {
+    local name="$1"
+    local script_dir candidate
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    candidate="${script_dir}/${name}"
+    if [[ -x "$candidate" ]]; then
+        printf '%s\n' "$candidate"
+        return
+    fi
+
+    candidate="$(command -v "$name" 2>/dev/null || true)"
+    if [[ -n "$candidate" ]]; then
+        printf '%s\n' "$candidate"
+        return
+    fi
+
+    echo "Error: required helper '$name' not found next to qexec.sh or in PATH." >&2
+    exit 1
 }
 
 _qexec_parse_time_to_minutes() {
@@ -221,10 +248,12 @@ while [[ $# -gt 0 ]]; do
         -n|--ncpus)
             require_value "$1" "$2"
             NCPUS="$2"
+            NCPUS_WAS_SET=true
             shift 2
             ;;
         --ncpus=*)
             NCPUS="${1#--ncpus=}"
+            NCPUS_WAS_SET=true
             shift
             ;;
         --nodes)
@@ -287,11 +316,45 @@ while [[ $# -gt 0 ]]; do
             ;;
         --cmd-file)
             require_value "$1" "$2"
+            if [[ -n "$CMD_FILE" ]]; then
+                echo "Error: only one of --file/--cmd-file may be provided." >&2
+                exit 1
+            fi
             CMD_FILE="$2"
             shift 2
             ;;
         --cmd-file=*)
+            if [[ -n "$CMD_FILE" ]]; then
+                echo "Error: only one of --file/--cmd-file may be provided." >&2
+                exit 1
+            fi
             CMD_FILE="${1#--cmd-file=}"
+            shift
+            ;;
+        --file)
+            require_value "$1" "$2"
+            if [[ -n "$CMD_FILE" ]]; then
+                echo "Error: only one of --file/--cmd-file may be provided." >&2
+                exit 1
+            fi
+            CMD_FILE="$2"
+            shift 2
+            ;;
+        --file=*)
+            if [[ -n "$CMD_FILE" ]]; then
+                echo "Error: only one of --file/--cmd-file may be provided." >&2
+                exit 1
+            fi
+            CMD_FILE="${1#--file=}"
+            shift
+            ;;
+        --pack)
+            require_value "$1" "$2"
+            PACK="$2"
+            shift 2
+            ;;
+        --pack=*)
+            PACK="${1#--pack=}"
             shift
             ;;
         --preset)
@@ -345,28 +408,47 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# --cmd-file: validate file, set ARRAY and COMMAND automatically
+# --file/--cmd-file: validate file, set ARRAY and COMMAND automatically
+if [[ -n "$PACK" && -z "$CMD_FILE" ]]; then
+    echo "Error: --pack requires --file or --cmd-file." >&2
+    exit 1
+fi
+
+if [[ -n "$PACK" ]] && ! [[ "$PACK" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Error: --pack must be a positive integer." >&2
+    exit 1
+fi
+
 if [[ -n "$CMD_FILE" ]]; then
     if [[ ! -f "$CMD_FILE" ]]; then
-        echo "Error: --cmd-file '$CMD_FILE' does not exist." >&2
+        echo "Error: command file '$CMD_FILE' does not exist." >&2
         exit 1
     fi
-    NUM_LINES=$(grep -c . "$CMD_FILE" || true)
+    NUM_LINES=$(grep -cve '^[[:space:]]*$' "$CMD_FILE" || true)
     if [[ "$NUM_LINES" -eq 0 ]]; then
-        echo "Error: --cmd-file '$CMD_FILE' is empty." >&2
+        echo "Error: command file '$CMD_FILE' is empty after removing blank lines." >&2
         exit 1
     fi
     if [[ -n "$ARRAY" ]]; then
-        echo "Error: --cmd-file and --array are mutually exclusive." >&2
+        echo "Error: --file/--cmd-file and --array are mutually exclusive." >&2
         exit 1
     fi
     if [[ -n "$COMMAND" ]]; then
-        echo "Error: --cmd-file and a positional command are mutually exclusive." >&2
+        echo "Error: --file/--cmd-file and a positional command are mutually exclusive." >&2
         exit 1
     fi
     CMD_FILE="$(cd "$(dirname "$CMD_FILE")" && pwd)/$(basename "$CMD_FILE")"
-    ARRAY="1-${NUM_LINES}"
-    COMMAND="sed -n \"\${SLURM_ARRAY_TASK_ID}p\" \"${CMD_FILE}\" | bash"
+    if [[ -n "$PACK" ]]; then
+        CMD_DIST_PATH="$(_qexec_find_helper command_distributor.sh)"
+        ARRAY="1-1"
+        if [[ "$NCPUS_WAS_SET" == false && "$NCPUS" -eq 1 ]]; then
+            NCPUS="$PACK"
+        fi
+        COMMAND="$(printf '%q' "$CMD_DIST_PATH") $(printf '%q' "$CMD_FILE") 1 $PACK"
+    else
+        ARRAY="1-${NUM_LINES}"
+        COMMAND="awk 'NF { n++; if (n == ENVIRON[\"SLURM_ARRAY_TASK_ID\"]) { print; exit } }' \"${CMD_FILE}\" | bash"
+    fi
 fi
 
 if [[ -n "$ARRAY" ]] && ! [[ "$ARRAY" =~ ^[0-9]+(-[0-9]+)?(%[0-9]+)?$ ]]; then

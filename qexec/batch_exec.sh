@@ -106,7 +106,7 @@ cmd_expand_args=()
 $link_mode && cmd_expand_args+=(--link)
 $quote_mode && cmd_expand_args+=(--quote)
 
-"$CMD_EXPAND_PATH" "${cmd_expand_args[@]}" "$@" >"$cmd_file"
+"$CMD_EXPAND_PATH" ${cmd_expand_args[@]+"${cmd_expand_args[@]}"} "$@" >"$cmd_file"
 num_cmds=$(wc -l <"$cmd_file" | xargs)
 
 if [[ -z "$num_cmds" || "$num_cmds" -eq 0 ]]; then

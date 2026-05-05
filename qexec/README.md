@@ -9,7 +9,7 @@ A suite of shell scripts for submitting and managing jobs on SLURM clusters. Des
 | Script | What it does |
 |---|---|
 | **cmd_expand.sh** | Expands a parameterized command into a list of concrete commands via Cartesian product or positional zip. Pure text transformation — no SLURM dependency. |
-| **qexec.sh** | Submits a single job to SLURM: `salloc` for interactive sessions, `sbatch` for batch jobs. Handles time, memory, CPUs, array indices, logging, and OpenMP threading. The parser is portable across BSD/macOS/Linux shells and supports both `--flag value` and `--flag=value` forms. |
+| **qexec.sh** | Submits jobs to SLURM: `salloc` for interactive sessions, `sbatch` for batch jobs, one-command-per-task command files, and packed single-node command files via `--file ... --pack N`. Handles time, memory, CPUs, array indices, logging, and OpenMP threading. The parser is portable across BSD/macOS/Linux shells and supports both `--flag value` and `--flag=value` forms. |
 | **command_distributor.sh** | Runs inside a SLURM array task. Splits a command file into batches by `SLURM_ARRAY_TASK_ID` and executes its share via GNU Parallel. |
 | **batch_exec.sh** | Orchestrator that ties the above together: expands commands with `cmd_expand.sh`, then submits them as a SLURM array job that uses `command_distributor.sh` to distribute work across nodes. |
 
@@ -59,16 +59,25 @@ Option B: Pre-made command file → batched across nodes (bexec.sh)
   bexec.sh -f commands.txt -n 5
     Submits via qexec.sh → command_distributor.sh (same as above)
 
-Option C: Pre-made command file → one task per command (qexec.sh --cmd-file)
+Option C: Pre-made command file → one task per command (qexec.sh --file)
 
-  qexec.sh --cmd-file commands.txt
+  qexec.sh --file commands.txt
     Submits sbatch --array=1-N (one SLURM task per line)
     Each task runs exactly one command — no GNU Parallel
+
+Option D: Pre-made command file → packed onto one node (qexec.sh --file --pack)
+
+  qexec.sh --file commands.txt --pack 5
+    Submits one Slurm array task
+    Runs commands.txt through command_distributor.sh + GNU Parallel
+    Keeps at most 5 commands running at one time
 ```
 
 Use **A** or **B** when you have many commands and want to batch them onto
 fewer nodes. Use **C** when each command needs its own dedicated SLURM task
-(e.g. long-running jobs that each need full node resources).
+(e.g. long-running jobs that each need full node resources). Use **D** for a
+single-node pack, such as several short one-core commands sharing one
+allocation.
 
 ### Example: Run an R script over 100 subjects on 5 nodes
 
@@ -93,6 +102,9 @@ cat commands.txt   # 150 commands (50 x 3)
 
 # Step 3: Submit with the older bexec interface
 bexec.sh -f commands.txt -n 4 --ncpus 40 --time 3
+
+# Or pack a hand-written command file onto one node, 5 commands at a time:
+qexec.sh --file commands.txt --pack 5 --ncpus 5 --time 1
 
 # Or pipe directly:
 cmd_expand.sh prog [1..50] | send_slurm.sh -t 2 -n 4 --ncpus 8

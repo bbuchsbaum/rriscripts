@@ -218,6 +218,55 @@ setup() {
     [[ "$output" == *"SLURM_ARRAY_TASK_ID"* ]]
 }
 
+@test "file dry-run: aliases cmd-file" {
+    tmpfile=$(mktemp)
+    printf 'echo hello\necho world\n' > "$tmpfile"
+    run "$QEXEC" --dry-run --file "$tmpfile"
+    rm -f "$tmpfile"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ARRAY=1-2"* ]]
+    [[ "$output" == *"--array=1-2"* ]]
+    [[ "$output" == *"SLURM_ARRAY_TASK_ID"* ]]
+}
+
+@test "file pack dry-run: submits one packed task via command_distributor" {
+    tmpfile=$(mktemp)
+    printf 'sleep 60\nsleep 30\nsleep 25\n' > "$tmpfile"
+    run "$QEXEC" --dry-run --file "$tmpfile" --pack 5
+    rm -f "$tmpfile"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ARRAY=1-1"* ]]
+    [[ "$output" == *"--array=1-1"* ]]
+    [[ "$output" == *"NCPUS=5"* ]]
+    [[ "$output" == *"command_distributor.sh"* ]]
+    [[ "$output" == *" 1 5"* ]]
+}
+
+@test "file pack dry-run: explicit ncpus is preserved" {
+    tmpfile=$(mktemp)
+    printf 'echo one\necho two\n' > "$tmpfile"
+    run "$QEXEC" --dry-run --ncpus 12 --file "$tmpfile" --pack 5
+    rm -f "$tmpfile"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"NCPUS=12"* ]]
+    [[ "$output" == *"command_distributor.sh"* ]]
+}
+
+@test "pack without file fails" {
+    run "$QEXEC" --dry-run --pack 5 -- echo hi
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--pack requires"* ]]
+}
+
+@test "invalid pack fails" {
+    tmpfile=$(mktemp)
+    echo "echo hi" > "$tmpfile"
+    run "$QEXEC" --dry-run --file "$tmpfile" --pack 0
+    rm -f "$tmpfile"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--pack"* ]]
+}
+
 @test "cmd-file: nonexistent file fails" {
     run "$QEXEC" --dry-run --cmd-file /nonexistent
     [ "$status" -ne 0 ]
