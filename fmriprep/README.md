@@ -36,7 +36,7 @@ If `~/bin` is not on your `PATH`, add it to `~/.bashrc`:
 export PATH="$HOME/bin:$PATH"
 ```
 
-**Requirements:** Python 3.7+, SLURM, and Singularity/Apptainer or Docker.
+**Requirements:** Python 3.10+, SLURM, and Singularity/Apptainer or Docker.
 `questionary` (`pip install --user questionary`) is optional but improves the
 wizard UX.
 
@@ -50,8 +50,9 @@ These are one-time setup steps and are usually shared across a lab.
 Run this on a **login node** — compute nodes typically have no internet:
 
 ```bash
-# Pick a version from https://hub.docker.com/r/nipreps/fmriprep/tags
-VERSION=24.1.0
+# Pick and pin a version from https://hub.docker.com/r/nipreps/fmriprep/tags
+# or https://fmriprep.org/en/latest/changes.html
+VERSION=25.2.5
 
 # Singularity (15-30 min):
 singularity build fmriprep_${VERSION}.sif docker://nipreps/fmriprep:${VERSION}
@@ -68,9 +69,10 @@ Put the `.sif` somewhere lab members can share:
 mv fmriprep_${VERSION}.sif /project/def-piname/shared/bin/
 ```
 
-You will set `container = /project/def-piname/shared/bin/fmriprep_24.1.0.sif`
-in your config below. (Docker users can skip the path — the launcher
-auto-discovers local Docker images.)
+You will set `container = /project/def-piname/shared/bin/fmriprep_25.2.5.sif`
+in your config below. Replace `25.2.5` with the version your project has
+validated. Docker users can skip the path if the image is already local — the
+launcher auto-discovers local Docker images.
 
 ### 2. A FreeSurfer license
 
@@ -98,9 +100,9 @@ tfa.get('fsLR')
 cp -r /project/shared/templateflow ~/.cache/templateflow
 ```
 
-The launcher auto-binds your local cache into the container, sets
-`TEMPLATEFLOW_HOME` inside it, and validates that templates exist before
-generating the sbatch.
+The launcher auto-binds your local cache into the container and sets
+`TEMPLATEFLOW_HOME` inside it. The interactive wizards warn when the cache is
+missing or empty; `slurm-array` assumes the path you pass is ready to use.
 
 ## Quick Start
 
@@ -119,26 +121,31 @@ cd /path/to/my_bids_dataset
 fmriprep_launcher.py init
 $EDITOR fmriprep.ini                    # set bids, out, work, subjects, ...
 
-# 4. Verify and generate the sbatch:
+# 4A. Express interactive route:
 fmriprep_launcher.py wizard --quick
+sbatch /path/printed/by/launcher/fmriprep_array.sbatch
 
-# 5. Submit:
-sbatch fmriprep_job/fmriprep_array.sbatch
+# 4B. Scripted route, or if you want manifest-based reruns:
+fmriprep_launcher.py slurm-array
+sbatch /path/printed/by/launcher/fmriprep_array.sbatch
 
-# 6. If any subjects fail, rerun just those:
-fmriprep_launcher.py rerun-failed --manifest fmriprep_job/job_manifest.json
+# If any subjects fail in a manifest-backed run, rerun just those:
+fmriprep_launcher.py rerun-failed --manifest /path/printed/by/launcher/job_manifest.json
 ```
 
-What each step does is covered in [Subcommand Reference](#subcommand-reference)
-below.
+`wizard --quick` is the fastest interactive route. Use `slurm-array` or the
+default `wizard` when you need `job_manifest.json` for `rerun-failed`. What
+each step does is covered in
+[Subcommand Reference](#subcommand-reference) below.
 
 A complete annotated config is in `fmriprep.ini.example`. The launcher reads
 config files in priority order (later overrides earlier):
 
 1. `/etc/fmriprep/config.ini` (system-wide)
-2. `~/.config/fmriprep/config.ini` or `~/.fmriprep.ini` (user — infrastructure)
-3. `./fmriprep.ini` (project — dataset-specific)
-4. `--config path/to/file.ini` (explicit override)
+2. `~/.config/fmriprep/config.ini` (user — infrastructure)
+3. `~/.fmriprep.ini` (legacy user override, if present)
+4. `./fmriprep.ini` (project — dataset-specific)
+5. `--config path/to/file.ini` (explicit override)
 
 The recommended split is:
 
@@ -158,9 +165,10 @@ launcher is on `PATH`; otherwise prefix with `python3`.
 fmriprep_launcher.py probe
 ```
 
-Lists the runtime (Singularity/Apptainer/Docker), available container images,
-your FreeSurfer license, TemplateFlow cache status, and the effective merged
-config. Run this first to confirm prerequisites are in place.
+Lists the loaded config files and effective config values, detects the
+available runtime (Singularity/Apptainer/Docker), and reports configured SIF
+images or local Docker fMRIPrep images. Run this first to confirm the launcher
+sees the same prerequisites you expect.
 
 ### `init` — generate a starter config
 
@@ -182,8 +190,10 @@ fmriprep_launcher.py wizard            # review-and-edit table of all values
 ```
 
 Both modes auto-discover defaults from your config and environment. `--quick`
-asks only for items the launcher can't infer; the default mode shows a numbered
-table of every value and lets you edit by field number.
+asks only for items the launcher can't infer and writes an sbatch plus
+`subjects.txt`. The default mode shows a numbered table of every value, lets
+you edit by field number, and writes the sbatch, `subjects.txt`, and
+`job_manifest.json`.
 
 ### `slurm-array` — write the sbatch directly
 
@@ -202,7 +212,8 @@ fmriprep_launcher.py slurm-array \
     --account rrg-mypi
 ```
 
-Writes a complete bundle to `./fmriprep_job/`:
+Writes a complete bundle to `$SCRATCH/<bids-basename>_fmriprep_job/` when
+`$SCRATCH` is set, otherwise `./fmriprep_job/`:
 
 - `fmriprep_array.sbatch` — the SLURM script
 - `subjects.txt` — one line per array task
@@ -315,7 +326,7 @@ log_dir = /scratch/myuser/fmriprep_logs
 | `account` | string | — | SLURM account/allocation (e.g. `def-piname`) |
 | `job_name` | string | `fmriprep` | SLURM job name |
 | `log_dir` | path | `<script_outdir>/logs` | Directory for SLURM stdout/stderr logs |
-| `script_outdir` | path | `$SCRATCH/<bids>_fmriprep_job` if `$SCRATCH` set, else `./fmriprep_job` | Where to write the generated sbatch + bundle. Must be writable from compute nodes (`status/` is mutated at runtime). |
+| `script_outdir` | path | `$SCRATCH/<bids-basename>_fmriprep_job` if `$SCRATCH` set, else `./fmriprep_job` | Where to write the generated sbatch + bundle. Must be writable from compute nodes (`status/` is mutated at runtime). |
 | `cpus_per_task` | int | from `nprocs` | Override `--cpus-per-task` in the SLURM header |
 | `mem` | string | from `mem_mb` | SLURM `--mem` value (e.g. `32G`). Use `none` to omit |
 | `no_mem` | bool | `false` | Omit `--mem` entirely (for whole-node clusters like Trillium) |
@@ -381,8 +392,9 @@ overhead:
 fmriprep_launcher.py slurm-array ... --subjects-per-job 4
 ```
 
-Each array task then runs 4 subjects in parallel via `xargs`, and the
-launcher scales `--nprocs` and `--mem` accordingly (4× per task).
+Each array task then runs 4 subjects in parallel via `xargs`. The launcher
+requests 4× the per-subject CPU and memory for that array task and writes one
+line per subject batch to `subjects.txt`.
 
 ## What's in This Directory
 
