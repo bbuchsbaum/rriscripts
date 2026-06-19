@@ -41,6 +41,14 @@ teardown() {
     [[ "$output" == *"--time"* ]]
 }
 
+@test "dry-run: --pack aliases --jobs" {
+    run "$BATCH_EXEC" --dry-run -n 2 --pack 3 -- echo [1..4]
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Expanded to 4 commands"* ]]
+    [[ "$output" == *"command_distributor.sh"* ]]
+    [[ "$output" == *" 2 3"* ]]
+}
+
 @test "dry-run: memory option" {
     run "$BATCH_EXEC" --dry-run -m 8G -- echo [1,2]
     [ "$status" -eq 0 ]

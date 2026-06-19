@@ -14,7 +14,7 @@ set -euo pipefail
 #   -m, --mem MEM           Memory per task
 #   -n, --ncpus N           CPUs per task (default: 1)
 #       --nodes N           Nodes per array task; with --pack, number of batches
-#       --pack N            Split stdin across --nodes array tasks and run up to
+#       --pack N, --jobs N  Split stdin across --nodes array tasks and run up to
 #                           N commands concurrently per task
 #   -j, --name NAME         Slurm job name (default: array_job)
 #   -a, --array SPEC        Override array indices (default: 1-N for N input commands)
@@ -74,7 +74,8 @@ while [[ $# -gt 0 ]]; do
         -m|--mem)             MEM="${2:-}"; shift 2 ;;
         -n|--ncpus)           NCPUS="${2:-}"; NCPUS_WAS_SET=true; shift 2 ;;
         --nodes)              NODES="${2:-}"; shift 2 ;;
-        --pack)               PACK="${2:-}"; shift 2 ;;
+        --pack|--jobs)        PACK="${2:-}"; shift 2 ;;
+        --pack=*|--jobs=*)    PACK="${1#*=}"; shift ;;
         -j|--name)            JOB_NAME="${2:-}"; shift 2 ;;
         -a|--array)           ARRAY="${2:-}"; shift 2 ;;
         --account)            ACCOUNT="${2:-}"; shift 2 ;;
@@ -103,12 +104,12 @@ do
 done
 
 if [[ -n "$PACK" ]] && ! [[ "$PACK" =~ ^[1-9][0-9]*$ ]]; then
-    echo "Error: --pack must be a positive integer." >&2
+    echo "Error: --pack/--jobs must be a positive integer." >&2
     exit 1
 fi
 
 if [[ -n "$PACK" && -n "$ARRAY" ]]; then
-    echo "Error: --array cannot be used with --pack; use --nodes to set the number of packed batches." >&2
+    echo "Error: --array cannot be used with --pack/--jobs; use --nodes to set the number of packed batches." >&2
     exit 1
 fi
 

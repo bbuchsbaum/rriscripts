@@ -40,10 +40,19 @@ teardown() {
     [[ "$output" == *"command_distributor.sh"* ]]
 }
 
+@test "pack dry-run: --jobs aliases --pack" {
+    run bash -lc "printf 'echo one\necho two\necho three\n' | '$SEND_SLURM' --dry-run --state-dir '$TMPDIR' --nodes 2 --jobs 3"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Submitting 3 command(s) across 2 packed batch(es), up to 3 concurrent command(s) per batch"* ]]
+    [[ "$output" == *"--array=1-2"* ]]
+    [[ "$output" == *"NCPUS=3"* ]]
+    [[ "$output" == *" 2 3"* ]]
+}
+
 @test "pack with explicit array fails" {
     run bash -lc "printf 'echo one\n' | '$SEND_SLURM' --dry-run --state-dir '$TMPDIR' --nodes 2 --pack 3 --array 1-2"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"--array cannot be used with --pack"* ]]
+    [[ "$output" == *"--array cannot be used with --pack/--jobs"* ]]
 }
 
 @test "empty stdin fails" {

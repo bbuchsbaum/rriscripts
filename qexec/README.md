@@ -1,12 +1,12 @@
 # qexec - SLURM Job Submission Toolkit
 
-`qexec` is a small set of shell tools for submitting and monitoring SLURM jobs. It covers single commands, interactive sessions, generated command grids, prewritten command files, packed single-node runs, and lightweight job monitoring.
+`qexec` is a small set of shell tools for submitting and monitoring SLURM jobs. It covers single commands, interactive sessions, generated command grids, prewritten command files, packed command-file runs across one or more array tasks, and lightweight job monitoring.
 
 ## Tools
 
 | Script | Purpose |
 |---|---|
-| `qexec.sh` | Main SLURM launcher. Submits batch jobs with `sbatch`, interactive jobs with `salloc`, command files as arrays, and packed command files with a fixed concurrency cap. |
+| `qexec.sh` | Main SLURM launcher. Submits batch jobs with `sbatch`, interactive jobs with `salloc`, command files as arrays, and packed command files with a per-task concurrency cap. |
 | `cmd_expand.sh` | Expands bracket expressions into concrete command lines. Use it to generate command files or pipe commands into `send_slurm.sh`. |
 | `batch_exec.sh` | Expands a parameterized command with `cmd_expand.sh`, then submits the generated commands as a SLURM array job using `command_distributor.sh`. |
 | `bexec.sh` | Submits an existing command file as a batched SLURM array job using `command_distributor.sh`. |
@@ -68,6 +68,14 @@ qexec.sh --file commands.txt --pack 5 --time 1 --ncpus 5
 
 Pack mode submits one SLURM task and runs the command file through `command_distributor.sh` with GNU Parallel capped at the requested pack size. If `--ncpus` is not provided and qexec would otherwise request one CPU, `qexec.sh` sets `--ncpus` to the pack size.
 
+To split the same file across 4 packed array tasks, with no more than 4 commands active in each task:
+
+```bash
+qexec.sh --file commands.txt --nodes 4 --pack 4 --time 1 --ncpus 4
+```
+
+With `--file --pack`, an explicit `--nodes K` means K packed one-node array tasks. The example submits `--array=1-4 --nodes=1`, and each array task runs its slice through `command_distributor.sh` with GNU Parallel capped at 4 commands. `--jobs` is accepted as a long-option alias for `--pack`.
+
 ### Batch A Command File Across Several Array Tasks
 
 Use `bexec.sh` when you already have a command file and want to split it across several SLURM array tasks:
@@ -77,6 +85,8 @@ bexec.sh --file commands.txt --nodes 4 --jobs 10 --ncpus 40 --time 3
 ```
 
 This creates a 4-task array. Each array task receives a slice of `commands.txt` and runs up to 10 commands at a time.
+
+The per-task concurrency cap has two accepted long-option spellings: `--jobs` and `--pack`. In other words, `qexec.sh --file commands.txt --nodes K --pack M`, `qexec.sh --file commands.txt --nodes K --jobs M`, `bexec.sh --nodes K --jobs M`, `batch_exec.sh --nodes K --jobs M`, and `send_slurm.sh --nodes K --pack M` all express K packed array tasks with at most M commands running inside each task. The wrapper scripts also accept the other long spelling for this cap.
 
 ### Generate And Submit A Command Grid
 
@@ -117,7 +127,7 @@ To split piped commands across 5 packed array tasks, with at most 3 commands run
 cmd_expand.sh command.sh [1..10] | send_slurm.sh --nodes 5 --pack 3 --time 1
 ```
 
-In pack mode, `--nodes` is the number of packed array tasks and `--pack` is the per-task command concurrency cap. If `--ncpus` is not provided and `send_slurm.sh` would otherwise request one CPU, it sets `--ncpus` to the pack size.
+In pack mode, `--nodes` is the number of packed array tasks and `--pack`/`--jobs` is the per-task command concurrency cap. If `--ncpus` is not provided and `send_slurm.sh` would otherwise request one CPU, it sets `--ncpus` to the pack size.
 
 ### Monitor Jobs
 
@@ -154,13 +164,13 @@ Output options:
 |---|---|
 | `--time`, `-t` | Wall time. Bare numbers are hours; suffixes such as `30m` and `1hr` are accepted. |
 | `--ncpus`, `-n` | CPUs per task. |
-| `--nodes` | Nodes per task. |
+| `--nodes` | Nodes per task. With `--file --pack`, explicit `--nodes K` means K packed one-node array tasks. |
 | `--mem`, `-m` | Memory request. |
 | `--no-mem` | Do not pass `--mem` to SLURM. |
 | `--name`, `-j` | SLURM job name. |
 | `--array`, `-a` | SLURM array range, including throttles such as `1-100%10`. |
 | `--file` | Command file, one nonblank command per line. |
-| `--pack` | With `--file`, run all commands in one SLURM task with this many concurrent commands. |
+| `--pack`, `--jobs` | With `--file`, run commands through GNU Parallel with this many concurrent commands per packed array task. |
 | `--account` | SLURM account. |
 | `--omp_num_threads`, `-o` | Sets `OMP_NUM_THREADS` and `MKL_NUM_THREADS`. |
 | `--log-dir`, `-l` | Directory for SLURM stdout and stderr files. |

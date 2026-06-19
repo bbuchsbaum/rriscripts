@@ -19,6 +19,14 @@ teardown() {
     [[ "$output" == *"Dry-run"* ]]
 }
 
+@test "dry-run: --pack aliases --jobs" {
+    run "$BEXEC" --dry-run -f "$TMPDIR/cmds.txt" -n 2 --pack 3
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Submitting 2 commands across 2 batch(es)."* ]]
+    [[ "$output" == *"command_distributor.sh"* ]]
+    [[ "$output" == *" 2 3"* ]]
+}
+
 @test "invalid time fails" {
     run "$BEXEC" --dry-run -f "$TMPDIR/cmds.txt" --time 0
     [ "$status" -ne 0 ]

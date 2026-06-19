@@ -14,7 +14,7 @@ set -euo pipefail
 #   -n, --nodes N           Number of array tasks / batches (default: 1)
 #       --ncpus N           CPUs per array task (default: 40)
 #   -m, --mem MEM           Memory per task (e.g., 6G). Omit to use qexec defaults.
-#   -j, --jobs N            GNU parallel jobs per task (default: 40)
+#   -j, --jobs, --pack N    GNU parallel jobs per task (default: 40)
 #   -N, --name NAME         Slurm job name (optional)
 #       --account NAME      Slurm account (optional; defaults to qexec default)
 #   -l, --log-dir DIR       Slurm log directory (passed to qexec)
@@ -68,7 +68,7 @@ while [[ $# -gt 0 ]]; do
         -n|--nodes)    nodes="$2"; shift 2 ;;
         --ncpus)       ncpus="$2"; shift 2 ;;
         -m|--mem)      mem="$2"; shift 2 ;;
-        -j|--jobs)     jobs="$2"; shift 2 ;;
+        -j|--jobs|--pack) jobs="$2"; shift 2 ;;
         -N|--name)     job_name="$2"; shift 2 ;;
         --account)     account="$2"; shift 2 ;;
         -l|--log-dir)  log_dir="$2"; shift 2 ;;

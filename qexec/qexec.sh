@@ -14,7 +14,8 @@ set -euo pipefail
 #   -i, --interactive      Submit an interactive job (default: false).
 #   -m, --mem              Amount of memory per node (default: not set).
 #   -n, --ncpus            Number of CPUs per task (default: "1").
-#       --nodes            Number of nodes (default: "1").
+#       --nodes            Number of nodes (default: "1"); with --file --pack,
+#                          number of packed one-node array tasks.
 #   -j, --name             Job name (default: "").
 #   -a, --array            Array indices for array jobs (default: "").
 #       --account          Account name (default: "rrg-brad").
@@ -27,8 +28,9 @@ set -euo pipefail
 #       --after JOBID      Run after JOBID completes (adds --dependency=afterok:JOBID).
 #   -w, --wait             Wait for the job to finish and show efficiency stats.
 #       --file FILE        Alias for --cmd-file.
-#       --pack N           With --file/--cmd-file, run all commands in one
-#                          Slurm task with at most N commands at a time.
+#       --pack N           With --file/--cmd-file, run commands through GNU
+#                          Parallel with at most N commands per array task.
+#       --jobs N           Alias for --pack.
 #
 # Configuration:
 #   ~/.qexecrc             Optional config file sourced before arg parsing.
@@ -45,6 +47,7 @@ MEM="${QEXEC_DEFAULT_MEM:-}"
 NCPUS=1
 NCPUS_WAS_SET=false
 NODES=1
+NODES_WAS_SET=false
 JOB_NAME=""
 ARRAY=""
 ACCOUNT="${QEXEC_DEFAULT_ACCOUNT:-rrg-brad}"
@@ -55,6 +58,8 @@ DRY_RUN=false
 NO_MEM=false
 CMD_FILE=""
 PACK=""
+PACK_OPTION=""
+PACK_BATCHES=""
 AFTER=""
 PRESET=""
 WAIT=false
@@ -129,7 +134,7 @@ usage() {
     echo "  -i, --interactive      Submit an interactive job (default: false)."
     echo "  -m, --mem              Amount of memory per node (default: not set)."
     echo "  -n, --ncpus            Number of CPUs per task (default: 1)."
-    echo "      --nodes            Number of nodes (default: 1)."
+    echo "      --nodes            Number of nodes (default: 1); with --file --pack, packed array tasks."
     echo "  -j, --name             Job name (default: '')."
     echo "  -a, --array            Array indices for array jobs (default: '')."
     echo "      --account          Account name (default: rrg-brad)."
@@ -138,7 +143,8 @@ usage() {
     echo "      --no-mem           Do not pass --mem to Slurm (overrides -m/--mem)."
     echo "      --cmd-file FILE    Read commands from FILE and submit as an array job."
     echo "      --file FILE        Alias for --cmd-file."
-    echo "      --pack N           With --file, run commands in one Slurm task, N at a time."
+    echo "      --pack N           With --file, run commands through GNU Parallel, N at a time per task."
+    echo "      --jobs N           Alias for --pack."
     echo "      --preset NAME      Load resource preset (fmriprep, freesurfer, mriqc, light, heavy)."
     echo "      --after JOBID      Run after JOBID completes (sbatch --dependency=afterok:JOBID)."
     echo "  -w, --wait             Wait for the job to finish and show efficiency stats."
@@ -162,6 +168,17 @@ require_value() {
         echo "Error: ${flag} requires a value." >&2
         usage
     fi
+}
+
+set_pack_value() {
+    local flag="$1"
+    local value="$2"
+    if [[ -n "$PACK" ]]; then
+        echo "Error: only one of --pack/--jobs may be provided once." >&2
+        exit 1
+    fi
+    PACK="$value"
+    PACK_OPTION="$flag"
 }
 
 _qexec_find_helper() {
@@ -259,10 +276,12 @@ while [[ $# -gt 0 ]]; do
         --nodes)
             require_value "$1" "$2"
             NODES="$2"
+            NODES_WAS_SET=true
             shift 2
             ;;
         --nodes=*)
             NODES="${1#--nodes=}"
+            NODES_WAS_SET=true
             shift
             ;;
         -j|--name)
@@ -350,11 +369,20 @@ while [[ $# -gt 0 ]]; do
             ;;
         --pack)
             require_value "$1" "$2"
-            PACK="$2"
+            set_pack_value "$1" "$2"
             shift 2
             ;;
         --pack=*)
-            PACK="${1#--pack=}"
+            set_pack_value "--pack" "${1#--pack=}"
+            shift
+            ;;
+        --jobs)
+            require_value "$1" "$2"
+            set_pack_value "$1" "$2"
+            shift 2
+            ;;
+        --jobs=*)
+            set_pack_value "--jobs" "${1#--jobs=}"
             shift
             ;;
         --preset)
@@ -410,12 +438,27 @@ done
 
 # --file/--cmd-file: validate file, set ARRAY and COMMAND automatically
 if [[ -n "$PACK" && -z "$CMD_FILE" ]]; then
-    echo "Error: --pack requires --file or --cmd-file." >&2
+    echo "Error: ${PACK_OPTION:-"--pack"} requires --file or --cmd-file." >&2
     exit 1
 fi
 
 if [[ -n "$PACK" ]] && ! [[ "$PACK" =~ ^[1-9][0-9]*$ ]]; then
-    echo "Error: --pack must be a positive integer." >&2
+    echo "Error: ${PACK_OPTION:-"--pack"} must be a positive integer." >&2
+    exit 1
+fi
+
+if ! [[ "$NCPUS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Error: --ncpus must be a positive integer." >&2
+    exit 1
+fi
+
+if ! [[ "$NODES" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Error: --nodes must be a positive integer." >&2
+    exit 1
+fi
+
+if ! [[ "$OMP_NUM_THREADS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Error: --omp_num_threads must be a positive integer." >&2
     exit 1
 fi
 
@@ -440,11 +483,16 @@ if [[ -n "$CMD_FILE" ]]; then
     CMD_FILE="$(cd "$(dirname "$CMD_FILE")" && pwd)/$(basename "$CMD_FILE")"
     if [[ -n "$PACK" ]]; then
         CMD_DIST_PATH="$(_qexec_find_helper command_distributor.sh)"
-        ARRAY="1-1"
+        PACK_BATCHES=1
+        if [[ "$NODES_WAS_SET" == true ]]; then
+            PACK_BATCHES="$NODES"
+            NODES=1
+        fi
+        ARRAY="1-${PACK_BATCHES}"
         if [[ "$NCPUS_WAS_SET" == false && "$NCPUS" -eq 1 ]]; then
             NCPUS="$PACK"
         fi
-        COMMAND="$(printf '%q' "$CMD_DIST_PATH") $(printf '%q' "$CMD_FILE") 1 $PACK"
+        COMMAND="$(printf '%q' "$CMD_DIST_PATH") $(printf '%q' "$CMD_FILE") $PACK_BATCHES $PACK"
     else
         ARRAY="1-${NUM_LINES}"
         COMMAND="awk 'NF { n++; if (n == ENVIRON[\"SLURM_ARRAY_TASK_ID\"]) { print; exit } }' \"${CMD_FILE}\" | bash"
@@ -477,21 +525,6 @@ fi
 # Validate TIME and convert to Slurm minutes.
 if ! TIME_MINUTES="$(_qexec_parse_time_to_minutes "$TIME")"; then
     echo "Error: --time must be a positive duration in hours by default (e.g. 1, .5, 30m, 1hr)." >&2
-    exit 1
-fi
-
-if ! [[ "$NCPUS" =~ ^[1-9][0-9]*$ ]]; then
-    echo "Error: --ncpus must be a positive integer." >&2
-    exit 1
-fi
-
-if ! [[ "$NODES" =~ ^[1-9][0-9]*$ ]]; then
-    echo "Error: --nodes must be a positive integer." >&2
-    exit 1
-fi
-
-if ! [[ "$OMP_NUM_THREADS" =~ ^[1-9][0-9]*$ ]]; then
-    echo "Error: --omp_num_threads must be a positive integer." >&2
     exit 1
 fi
 
@@ -530,6 +563,10 @@ if [ "$INTERACTIVE" == "true" ]; then
         echo "  NCPUS=$NCPUS"
         echo "  NODES=$NODES"
         echo "  ARRAY=$ARRAY"
+        if [[ -n "$PACK" ]]; then
+            echo "  PACK=$PACK"
+            echo "  PACK_BATCHES=$PACK_BATCHES"
+        fi
         echo "  MEM=${MEM:-}"
         echo "  MEM_FLAG=${MEM_FLAG:-<none>}"
         echo "  ACCOUNT=$ACCOUNT"
@@ -562,6 +599,10 @@ else
         echo "  NCPUS=$NCPUS"
         echo "  NODES=$NODES"
         echo "  ARRAY=$ARRAY"
+        if [[ -n "$PACK" ]]; then
+            echo "  PACK=$PACK"
+            echo "  PACK_BATCHES=$PACK_BATCHES"
+        fi
         echo "  MEM=${MEM:-}"
         echo "  MEM_FLAG=${MEM_FLAG:-<none>}"
         echo "  ACCOUNT=$ACCOUNT"

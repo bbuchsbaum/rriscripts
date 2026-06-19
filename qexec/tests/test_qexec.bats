@@ -242,6 +242,34 @@ setup() {
     [[ "$output" == *" 1 5"* ]]
 }
 
+@test "file pack dry-run: nodes sets packed batch count" {
+    tmpfile=$(mktemp)
+    printf 'echo 1\necho 2\necho 3\necho 4\necho 5\necho 6\n' > "$tmpfile"
+    run "$QEXEC" --dry-run --file "$tmpfile" --nodes 4 --pack 4
+    rm -f "$tmpfile"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ARRAY=1-4"* ]]
+    [[ "$output" == *"--array=1-4"* ]]
+    [[ "$output" == *"NODES=1"* ]]
+    [[ "$output" == *"NCPUS=4"* ]]
+    [[ "$output" == *"PACK_BATCHES=4"* ]]
+    [[ "$output" == *"command_distributor.sh"* ]]
+    [[ "$output" == *" 4 4"* ]]
+}
+
+@test "file pack dry-run: --jobs aliases --pack" {
+    tmpfile=$(mktemp)
+    printf 'echo one\necho two\necho three\n' > "$tmpfile"
+    run "$QEXEC" --dry-run --file "$tmpfile" --nodes 2 --jobs 3
+    rm -f "$tmpfile"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ARRAY=1-2"* ]]
+    [[ "$output" == *"NODES=1"* ]]
+    [[ "$output" == *"NCPUS=3"* ]]
+    [[ "$output" == *"PACK=3"* ]]
+    [[ "$output" == *" 2 3"* ]]
+}
+
 @test "file pack dry-run: explicit ncpus is preserved" {
     tmpfile=$(mktemp)
     printf 'echo one\necho two\n' > "$tmpfile"
@@ -258,6 +286,12 @@ setup() {
     [[ "$output" == *"--pack requires"* ]]
 }
 
+@test "jobs without file fails" {
+    run "$QEXEC" --dry-run --jobs 5 -- echo hi
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--jobs requires"* ]]
+}
+
 @test "invalid pack fails" {
     tmpfile=$(mktemp)
     echo "echo hi" > "$tmpfile"
@@ -265,6 +299,15 @@ setup() {
     rm -f "$tmpfile"
     [ "$status" -ne 0 ]
     [[ "$output" == *"--pack"* ]]
+}
+
+@test "invalid jobs fails" {
+    tmpfile=$(mktemp)
+    echo "echo hi" > "$tmpfile"
+    run "$QEXEC" --dry-run --file "$tmpfile" --jobs 0
+    rm -f "$tmpfile"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--jobs"* ]]
 }
 
 @test "cmd-file: nonexistent file fails" {
