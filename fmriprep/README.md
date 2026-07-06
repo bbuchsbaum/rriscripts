@@ -1,12 +1,24 @@
 # fmriprep/ — fMRIPrep Launcher Toolkit
 
-A single CLI (`fmriprep_launcher.py`) that builds correct
-[fMRIPrep](https://fmriprep.org) commands and generates SLURM array jobs for
-BIDS datasets. Supports Singularity/Apptainer, the `fmriprep-docker` wrapper,
-and plain Docker. INI is the only supported config format.
+This directory contains several interfaces, but there is one recommended
+path:
 
-Optional Textual TUI and Tk GUI frontends are available; everything below uses
-the CLI.
+1. Use `fmriprep_launcher.py`.
+2. Put stable settings in INI config files.
+3. Generate a SLURM bundle with `fmriprep_launcher.py slurm-array`.
+4. Submit the generated `fmriprep_array.sbatch` with `sbatch`.
+
+That is the default, no-frills command-line workflow. It is non-interactive,
+reproducible, and writes the `job_manifest.json` needed by `rerun-failed`.
+
+The wizard, Textual TUI, Tk GUI, and `run_fmriprep_wizard.sh` are convenience
+frontends around the same launcher/backend. They are optional; do not treat
+them as separate primary workflows.
+
+The launcher builds [fMRIPrep](https://fmriprep.org) commands and SLURM array
+jobs for BIDS datasets. It supports Singularity/Apptainer, the
+`fmriprep-docker` wrapper, and plain Docker. INI is the only supported config
+format.
 
 ## Install
 
@@ -15,7 +27,9 @@ curl -fsSL https://raw.githubusercontent.com/bbuchsbaum/rriscripts/main/fmriprep
 ```
 
 This installs the launcher to `~/.local/share/fmriprep` and symlinks
-`fmriprep_launcher.py` and `run_fmriprep_wizard.sh` into `~/bin`.
+`fmriprep_launcher.py` and `run_fmriprep_wizard.sh` into `~/bin`. The rest of
+this README uses `fmriprep_launcher.py`; the wrapper is only for users who
+want the interactive wizard.
 
 To customize directories:
 
@@ -104,39 +118,50 @@ The launcher auto-binds your local cache into the container and sets
 `TEMPLATEFLOW_HOME` inside it. The interactive wizards warn when the cache is
 missing or empty; `slurm-array` assumes the path you pass is ready to use.
 
-## Quick Start
+## Default Command-Line Workflow
 
-Once the prerequisites above are in place:
+Once the prerequisites above are in place, use the CLI/config path below. This
+is the recommended workflow for routine cluster runs and lab documentation.
 
 ```bash
-# 1. Confirm everything is detected:
-fmriprep_launcher.py probe
-
-# 2. Write a user-level config (once per cluster):
+# 1. One-time user-level config for cluster infrastructure:
 fmriprep_launcher.py init --user
 $EDITOR ~/.config/fmriprep/config.ini   # set runtime, container, fs_license, account, ...
 
-# 3. Write a project config in your BIDS root:
+# 2. Per-dataset project config:
 cd /path/to/my_bids_dataset
 fmriprep_launcher.py init
 $EDITOR fmriprep.ini                    # set bids, out, work, subjects, ...
 
-# 4A. Express interactive route:
-fmriprep_launcher.py wizard --quick
-sbatch /path/printed/by/launcher/fmriprep_array.sbatch
+# 3. Check what the launcher will use:
+fmriprep_launcher.py probe
 
-# 4B. Scripted route, or if you want manifest-based reruns:
-fmriprep_launcher.py slurm-array
-sbatch /path/printed/by/launcher/fmriprep_array.sbatch
+# 4. Generate the SLURM bundle and submit it:
+JOB_DIR="${SCRATCH:-$PWD}/$(basename "$PWD")_fmriprep_job"
+fmriprep_launcher.py slurm-array --script-outdir "$JOB_DIR"
+sbatch "$JOB_DIR/fmriprep_array.sbatch"
 
-# If any subjects fail in a manifest-backed run, rerun just those:
-fmriprep_launcher.py rerun-failed --manifest /path/printed/by/launcher/job_manifest.json
+# 5. If subjects fail, generate and submit a retry bundle:
+fmriprep_launcher.py rerun-failed --manifest "$JOB_DIR/job_manifest.json"
+sbatch "$JOB_DIR/rerun_failed_job/fmriprep_array.sbatch"
 ```
 
-`wizard --quick` is the fastest interactive route. Use `slurm-array` or the
-default `wizard` when you need `job_manifest.json` for `rerun-failed`. What
-each step does is covered in
-[Subcommand Reference](#subcommand-reference) below.
+If you do not set `--script-outdir`, the launcher writes the bundle to
+`$SCRATCH/<bids-basename>_fmriprep_job/` when `$SCRATCH` is set, otherwise to
+`./fmriprep_job/`. The bundle directory must be writable from compute nodes
+because `status/` markers are updated while the array job runs.
+
+Use the interactive paths only when they help:
+
+- `fmriprep_launcher.py wizard` reviews every value, writes an sbatch,
+  `subjects.txt`, and `job_manifest.json`.
+- `fmriprep_launcher.py wizard --quick` asks only for missing essentials, but
+  currently writes only the sbatch and `subjects.txt`; use `slurm-array` or the
+  full `wizard` if you need manifest-backed reruns.
+- `run_fmriprep_wizard.sh` just activates a likely virtualenv and runs
+  `fmriprep_launcher.py wizard`.
+- `fmriprep_launcher.py tui` and `fmriprep_launcher.py gui` are optional UI
+  frontends.
 
 A complete annotated config is in `fmriprep.ini.example`. The launcher reads
 config files in priority order (later overrides earlier):
@@ -152,7 +177,7 @@ The recommended split is:
 - **User config** — stable infrastructure: `runtime`, `container`,
   `fs_license`, `templateflow_home`, `account`, `partition`.
 - **Project config** — dataset-specific: `bids`, `out`, `work`, `subjects`,
-  `output_spaces`, `job_name`, `log_dir`.
+  `output_spaces`, `job_name`, `script_outdir`, `log_dir`.
 
 ## Subcommand Reference
 
@@ -193,11 +218,14 @@ Both modes auto-discover defaults from your config and environment. `--quick`
 asks only for items the launcher can't infer and writes an sbatch plus
 `subjects.txt`. The default mode shows a numbered table of every value, lets
 you edit by field number, and writes the sbatch, `subjects.txt`, and
-`job_manifest.json`.
+`job_manifest.json`. For a repeatable non-interactive run, prefer
+`slurm-array`.
 
 ### `slurm-array` — write the sbatch directly
 
-For scripted or repeat runs, skip the wizard once your config is stable:
+This is the default path once your config is stable. If `fmriprep.ini` contains
+the required values, `fmriprep_launcher.py slurm-array` is enough. You can also
+pass values explicitly:
 
 ```bash
 fmriprep_launcher.py slurm-array \
@@ -262,11 +290,12 @@ fmriprep_launcher.py tui   # requires: pip install textual
 fmriprep_launcher.py gui   # requires Tk and an X11 display
 ```
 
-Both wrap the same backend as the CLI; use whichever you prefer.
+Both wrap the same backend as the CLI. They are optional frontends; the default
+path remains `fmriprep_launcher.py slurm-array`.
 
 ## Configuration File Reference
 
-A well-populated project config eliminates most wizard questions:
+A well-populated project config lets `slurm-array` run without long flag lists:
 
 ```ini
 [defaults]
@@ -291,12 +320,18 @@ partition = compute
 time = 24:00:00
 account = rrg-mypi
 job_name = fmriprep_mystudy
-log_dir = /scratch/myuser/fmriprep_logs
+script_outdir = /scratch/myuser/my_study_fmriprep_job
+log_dir = /scratch/myuser/my_study_fmriprep_job/logs
 ```
 
 ### `[defaults]` keys
 
-| Key | Type | Default | Description |
+The table reports behavior when a key is omitted. The generated starter
+configs intentionally set some lab-friendly defaults, including
+`skip_bids_validation = true` and `fs_reconall = true`; edit those values for
+your study.
+
+| Key | Type | Default if omitted | Description |
 |---|---|---|---|
 | `bids` | path | *(required)* | BIDS dataset root directory |
 | `out` | path | *(required)* | Output directory (usually `<bids>/derivatives/fmriprep`) |
@@ -310,7 +345,7 @@ log_dir = /scratch/myuser/fmriprep_logs
 | `mem_mb` | int/string | ~90% of available | Memory limit in MB (also accepts `32G`, `2T`) |
 | `output_spaces` | string | — | Space-separated list, e.g. `MNI152NLin2009cAsym:res-2 T1w fsnative` |
 | `skip_bids_validation` | bool | `false` | Pass `--skip-bids-validation` |
-| `fs_reconall` | bool | `false` | Run FreeSurfer `recon-all` |
+| `fs_reconall` | bool | `false` | Run FreeSurfer `recon-all`; generated project configs set this to `true` |
 | `use_syn_sdc` | bool | `false` | Enable SyN-based fieldmap-less distortion correction |
 | `cifti_output` | bool | `false` | Generate CIFTI outputs |
 | `use_aroma` | bool | `false` | **Deprecated** — removed in fMRIPrep >= 23.1.0 |
@@ -319,7 +354,7 @@ log_dir = /scratch/myuser/fmriprep_logs
 
 ### `[slurm]` keys
 
-| Key | Type | Default | Description |
+| Key | Type | Default if omitted | Description |
 |---|---|---|---|
 | `partition` | string | `compute` | SLURM partition name |
 | `time` | string | `24:00:00` | Walltime limit (`HH:MM:SS`) |
@@ -334,8 +369,8 @@ log_dir = /scratch/myuser/fmriprep_logs
 | `mail_type` | string | — | SLURM mail events (e.g. `END,FAIL`) |
 | `module_singularity` | bool | `false` | Insert `module load singularity` in the generated script |
 
-Boolean values are case-insensitive (`true`/`True`/`TRUE`). Inline comments
-use `#` (preferred) or `;`.
+Boolean values are case-insensitive (`true`/`True`/`TRUE`). Use `#` for inline
+comments.
 
 ### Environment variables
 

@@ -1405,7 +1405,12 @@ Environment variables: FMRIPREP_SIF_DIR, FS_LICENSE, TEMPLATEFLOW_HOME
     p_slurm.add_argument("--email", default=config.get("slurm_email"))
     p_slurm.add_argument("--mail-type", default=config.get("slurm_mail_type"))
     p_slurm.add_argument("--job-name", default=config.get("slurm_job_name", "fmriprep"))
-    p_slurm.add_argument("--module-singularity", action="store_true", help="Insert 'module load singularity' in script")
+    p_slurm.add_argument(
+        "--module-singularity",
+        action="store_true",
+        default=config.get("slurm_module_singularity", "false").lower() == "true",
+        help="Insert 'module load singularity' in script",
+    )
     p_slurm.add_argument("--log-dir", type=Path,
                         default=Path(config["slurm_log_dir"]) if "slurm_log_dir" in config else None,
                         help="Override log directory (default: script-outdir/logs)")
