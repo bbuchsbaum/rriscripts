@@ -86,6 +86,10 @@ slurm_job_monitor.sh
 qexec.sh --wait --time 1 --ncpus 4 -- Rscript run.R
 ```
 
-This is convenient for a single job you intend to sit and watch. For anything
-longer, submit without `--wait` and monitor separately — otherwise the wait dies
-with your login session.
+It waits for the job it just submitted, not for anything already queued. This is
+convenient for a single job you intend to sit and watch. For anything longer,
+submit without `--wait` and monitor separately — otherwise the wait dies with
+your login session, though the job itself keeps running.
+
+See [Submit, then wait for that job to finish](../workflows/#submit-then-wait-for-that-job-to-finish)
+for the details.

@@ -139,15 +139,44 @@ first=$(qexec.sh --time 1 -- Rscript step1.R | grep -oE '[0-9]+$' | tail -1)
 qexec.sh --after "$first" --time 2 -- Rscript step2.R
 ```
 
-## Wait for a job and see how it went
+## Submit, then wait for that job to finish
+
+`--wait` does not wait for some other job — it submits your command as usual and
+then blocks until **the job it just submitted** finishes:
 
 ```bash
 qexec.sh --wait --time 1 --ncpus 4 -- Rscript run.R
 ```
 
-`--wait` blocks until the batch job finishes and then reports efficiency stats.
-For jobs you have already submitted, use
-[`slurm_job_monitor.sh`](../monitoring/).
+```text
+Executing: sbatch --time=60 --cpus-per-task=4 ...
+Submitted batch job 12345
+Waiting for job 12345 to finish...
+```
+
+Mechanically, `qexec.sh` reads the job ID out of `sbatch`'s output and hands it
+to [`slurm_job_monitor.sh`](../monitoring/), which polls until the job leaves the
+queue and then reports efficiency stats via `seff`. So `--wait` is exactly
+"submit, then monitor this one job", bundled into a single command.
+
+Two things to know:
+
+- **It ties the wait to your shell.** If your session drops, the wait ends — but
+  the job keeps running, because SLURM already has it. Reattach with
+  `slurm_job_monitor.sh 12345`.
+- **It needs `slurm_job_monitor.sh` next to `qexec.sh`.** If that script is
+  missing or not executable, your job is still submitted — `qexec.sh` just warns
+  `cannot wait` and `Job <id> submitted but not monitored`, then returns. The
+  same happens if it cannot parse a job ID out of `sbatch`'s output.
+
+`--wait` is rejected with interactive jobs (`--interactive`), which are already
+attached by definition.
+
+For a job you submitted earlier, or several at once, call the monitor directly:
+
+```bash
+slurm_job_monitor.sh 12345 12346
+```
 
 ## Use a resource preset
 

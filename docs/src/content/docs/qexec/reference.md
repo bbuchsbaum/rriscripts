@@ -28,7 +28,7 @@ qexec.sh [options] -- <command>
 | `--jobs N` | Alias for `--pack`. |
 | `--preset NAME` | Load a resource preset. See [below](#resource-presets). |
 | `--after JOBID` | Submit with `sbatch --dependency=afterok:JOBID`. |
-| `-w`, `--wait` | Wait for the job to finish and show efficiency stats. |
+| `-w`, `--wait` | Submit, then block until *that* job finishes and show its efficiency stats. Not allowed with `--interactive`. |
 | `-l`, `--log-dir` | Directory for SLURM stdout/stderr (default: current dir or `$QEXEC_LOG_DIR`). |
 | `-d`, `--dry-run` | Print the computed SLURM command and job script, then exit. |
 
