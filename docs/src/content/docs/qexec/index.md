@@ -14,15 +14,51 @@ makes it easy to check your reasoning before spending an allocation.
 
 ## The two that matter
 
-Almost everything is one of these:
+### `qexec.sh` — run something on the cluster
 
-| Command | What it does |
-|---|---|
-| `qexec.sh` | Submits work to SLURM — a single command, an interactive session, or a command file as an array. |
-| `cmd_expand.sh` | Turns `[1..100]`-style patterns into concrete command lines, so you can read them before submitting. |
+Give it a command and the resources it needs, and it submits that command as a
+SLURM job:
 
-Learning those two covers the whole toolkit. Everything below is a convenience
-on top of them.
+```bash
+qexec.sh --time 4 --ncpus 8 --mem 32G -- Rscript run.R
+```
+
+It also handles interactive sessions (`--interactive`) and whole files of
+commands (`--file`). Under the hood it builds an `sbatch` or `salloc` call and
+runs it — `--dry-run` shows you that call without submitting.
+
+### `cmd_expand.sh` — write out one command per subject
+
+The common HPC chore is running the same script over 100 subjects, or every
+combination of 50 subjects × 3 ROIs. Writing those command lines by hand is
+tedious and easy to get wrong. `cmd_expand.sh` writes them for you: you give it
+one command with the varying parts in brackets, and it prints the full list.
+
+```bash
+cmd_expand.sh Rscript run.R --sub [1..3] --roi [V1,MT]
+```
+
+```text
+Rscript run.R --sub 1 --roi V1
+Rscript run.R --sub 1 --roi MT
+Rscript run.R --sub 2 --roi V1
+Rscript run.R --sub 2 --roi MT
+Rscript run.R --sub 3 --roi V1
+Rscript run.R --sub 3 --roi MT
+```
+
+It submits nothing — it just prints. That is the point: you can read the list,
+count it, and fix a mistake before it becomes 600 queued jobs. Save it to a file
+and hand it to `qexec.sh --file`, or pipe it straight into `send_slurm.sh`.
+
+The brackets also read from files (`[file:subjects.txt]`), CSV columns
+(`[df:subject:data.csv]`), and globs (`[glob:data/*.nii]`) — see
+[`cmd_expand` syntax](./cmd-expand/).
+
+---
+
+Those two cover the whole toolkit. Everything below is a convenience on top of
+them.
 
 ## Convenience wrappers
 
@@ -47,7 +83,7 @@ These ship with the toolkit but sit outside the main path:
 | `rjobtop.py` | Live CPU and memory for a running job. Linux-only — it reads `/proc`, so it does not run on macOS. |
 | `slurm_job_monitor.sh` | Polls jobs to completion and reports `seff` efficiency stats. Also what `qexec.sh --wait` calls. |
 | `qexec_gui.tcl`, `batch_exec_gui.tcl` | Tcl/Tk frontends. Not installed by `install.sh`; run them from a clone. |
-| `qexec.hs`, `cmd_expand.hs`, `bexec.hs`, `command_distributor.hs` | Haskell reimplementations. Not built or installed by `install.sh`. |
+| `qexec.hs`, `cmd_expand.hs`, `bexec.hs`, `command_distributor.hs` | **Deprecated.** Haskell ports, kept for reference and scheduled for removal — see below. |
 
 :::note[Coverage is uneven]
 The submission path is well covered by the [bats suite](https://github.com/bats-core/bats-core) —
@@ -55,33 +91,36 @@ The submission path is well covered by the [bats suite](https://github.com/bats-
 `batch_exec.sh` 13, `send_slurm.sh` 7, `bexec.sh` 4.
 
 The tools in this last section have **no automated tests**: the monitors need a
-live SLURM job and a Linux `/proc`, and the GUIs need a display. The Haskell
-ports are not built by CI either, so treat them as unmaintained relative to the
-shell versions. Nothing here is broken as far as anyone knows — it is just less
-exercised, so check its output rather than assuming.
+live SLURM job and a Linux `/proc`, and the GUIs need a display. Nothing there is
+broken as far as anyone knows — it is just less exercised, so check its output
+rather than assuming.
+:::
+
+:::caution[The Haskell ports are deprecated]
+`qexec.hs`, `cmd_expand.hs`, `bexec.hs`, and `command_distributor.hs` were an
+exercise. They landed in one commit in December 2025 and were never revised,
+while the shell tools kept moving — `qexec.hs` alone is missing multi-node
+packing (`--pack`/`--jobs`), `--preset`, `--after`, `--wait`, `~/.qexecrc`, and
+`CC_CLUSTER` detection.
+
+Nothing builds, installs, or tests them: `install.sh` ships only the shell
+scripts and CI does not compile Haskell. They are kept for reference and are
+expected to be removed. **Use the shell versions.**
 :::
 
 `command_distributor.sh` also ships in the directory but runs *inside* an array
 task rather than being called directly; see
 [Repository layout](../repository-layout/).
 
-## Start here
+## Where to next
 
-```bash
-qexec.sh --time 4 --ncpus 8 --mem 32G --account mylab -- Rscript run.R
-```
+Both `--flag value` and `--flag=value` forms work throughout, so
+`--time 4` and `--time=4` are interchangeable.
 
-Both `--flag value` and `--flag=value` forms work throughout:
-
-```bash
-qexec.sh --time=4 --ncpus=8 --mem=32G --account=mylab -- Rscript run.R
-```
-
-Then read:
-
-- [Workflows](./workflows/) — the common submission patterns
+- [Workflows](./workflows/) — the common submission patterns, start to finish
 - [Packing and concurrency](./packing/) — running many commands per node
-- [`cmd_expand` syntax](./cmd-expand/) — turning `[1..100]` into commands
+- [`cmd_expand` syntax](./cmd-expand/) — every bracket form and both expansion modes
+- [Monitoring jobs](./monitoring/) — watching a run and catching a wasted allocation
 - [Reference](./reference/) — every flag, environment variable, and preset
 
 ## Installation

@@ -1,5 +1,17 @@
 #!/usr/bin/env runhaskell
 
+-- DEPRECATED -- unmaintained, and scheduled for removal.
+--
+-- The Haskell ports were an exercise. They landed in a single commit in
+-- December 2025 and were never revised, while the shell tools kept moving.
+-- Nothing builds, installs or tests this file: install.sh ships only the
+-- shell scripts, and CI does not compile Haskell.
+--
+-- Missing here, relative to command_distributor.sh: the
+-- QEXEC_PARALLEL_BIN override.
+--
+-- Use command_distributor.sh instead.
+
 {-
   command_distributor.hs
 

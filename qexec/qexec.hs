@@ -1,3 +1,16 @@
+-- DEPRECATED -- unmaintained, and scheduled for removal.
+--
+-- The Haskell ports were an exercise. They landed in a single commit in
+-- December 2025 and were never revised, while the shell tools kept moving.
+-- Nothing builds, installs or tests this file: install.sh ships only the
+-- shell scripts, and CI does not compile Haskell.
+--
+-- Missing here, relative to qexec.sh: multi-node packing via
+-- --pack/--jobs, --preset, --after, --wait, ~/.qexecrc, and
+-- CC_CLUSTER cluster detection.
+--
+-- Use qexec.sh instead.
+
 {-# LANGUAGE RecordWildCards #-}
 
 -- A Haskell reimplementation of qexec.sh for submitting jobs to SLURM.

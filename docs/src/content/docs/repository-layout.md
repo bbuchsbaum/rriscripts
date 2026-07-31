@@ -20,7 +20,7 @@ The rest:
 | `install.sh` | One-shot installer; copies the scripts to `~/bin` or `--prefix`. |
 | `qexec_gui.tcl`, `batch_exec_gui.tcl` | Tcl/Tk frontends for `qexec.sh` and `batch_exec.sh`. |
 | `batch_exec_gui` | Launcher shim for `batch_exec_gui.tcl`. |
-| `qexec.hs`, `cmd_expand.hs`, `bexec.hs`, `command_distributor.hs` | Haskell implementations of the corresponding shell tools. Not built or installed by `install.sh`. |
+| `qexec.hs`, `cmd_expand.hs`, `bexec.hs`, `command_distributor.hs` | **Deprecated.** Haskell ports of the corresponding shell tools, written as an exercise and unrevised since December 2025. Not built, installed, or tested, and behind the shell versions on features. Kept for reference; expected to be removed. Each file carries a header saying so. |
 | `rjobtop.py` | The job monitor. Reads `/proc`, so it only runs on Linux compute nodes. |
 | `tests/` | [bats-core](https://github.com/bats-core/bats-core) tests. No SLURM needed — they use dry runs and mocks. Run with `bats qexec/tests`. |
 
