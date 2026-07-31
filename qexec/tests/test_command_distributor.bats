@@ -128,8 +128,11 @@ MOCK
 @test "fails when GNU parallel is unavailable" {
     export SLURM_ARRAY_TASK_ID=1
     printf 'cmd1\n' > "$TMPDIR/cmds.txt"
-    mkdir -p "$TMPDIR/empty"
-    run env PATH="$TMPDIR/empty:/usr/bin:/bin" "$CMD_DIST" "$TMPDIR/cmds.txt" 1
+    # Point at a binary that cannot exist rather than trimming PATH: on Debian
+    # and Ubuntu GNU parallel lives in /usr/bin, so a PATH of
+    # "$TMPDIR/empty:/usr/bin:/bin" still finds it and the guard never fires.
+    run env QEXEC_PARALLEL_BIN="$TMPDIR/definitely-not-parallel" \
+        "$CMD_DIST" "$TMPDIR/cmds.txt" 1
     [ "$status" -ne 0 ]
     [[ "$output" == *"GNU parallel"* ]]
 }
