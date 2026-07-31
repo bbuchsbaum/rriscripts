@@ -1,16 +1,18 @@
 ---
 title: qexec
-description: A small set of shell tools for submitting and monitoring SLURM jobs.
+description: Shell tools for getting work onto SLURM — single commands, interactive sessions, command grids, and packed array jobs.
 ---
 
-`qexec` is a small set of shell tools for submitting and monitoring SLURM jobs.
-It covers single commands, interactive sessions, generated command grids,
-prewritten command files, packed command-file runs across one or more array
-tasks, and lightweight job monitoring.
+`qexec` is a small set of shell tools for **getting work onto SLURM**: single
+commands, interactive sessions, generated command grids, prewritten command
+files, and packed command-file runs across one or more array tasks.
 
 Nothing here replaces SLURM — `qexec.sh` computes an `sbatch`/`salloc`
 invocation and runs it. `--dry-run` prints exactly what it would submit, which
 makes it easy to check your reasoning before spending an allocation.
+
+A couple of monitoring helpers ship alongside, but they are a smaller and less
+exercised part of the toolkit — see [Also in the directory](#also-in-the-directory).
 
 ## The two that matter
 

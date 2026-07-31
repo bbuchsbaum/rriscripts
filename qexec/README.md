@@ -1,9 +1,10 @@
 # qexec — SLURM Job Submission Toolkit
 
-`qexec` is a small set of shell tools for submitting and monitoring SLURM jobs.
-It covers single commands, interactive sessions, generated command grids,
-prewritten command files, packed command-file runs across one or more array
-tasks, and lightweight job monitoring.
+`qexec` is a small set of shell tools for getting work onto SLURM: single
+commands, interactive sessions, generated command grids, prewritten command
+files, and packed command-file runs across one or more array tasks. A couple of
+monitoring helpers ship alongside, but they are a smaller and less exercised
+part of the toolkit.
 
 📖 **Full documentation: <https://bbuchsbaum.github.io/rriscripts/qexec/>**
 

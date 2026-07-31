@@ -9,7 +9,7 @@ can install just the one you need.
 
 | Toolkit | What it does | Guide |
 |---|---|---|
-| [`qexec/`](qexec/) | SLURM job submission, command expansion, and job monitoring | [qexec guide](https://bbuchsbaum.github.io/rriscripts/qexec/) |
+| [`qexec/`](qexec/) | SLURM job submission and command expansion | [qexec guide](https://bbuchsbaum.github.io/rriscripts/qexec/) |
 | [`fmriprep/`](fmriprep/) | Building and submitting fMRIPrep jobs for BIDS datasets | [fmriprep guide](https://bbuchsbaum.github.io/rriscripts/fmriprep/) |
 | [`xnat_cli/`](xnat_cli/) | Working with XNAT repositories from R | [xnat_cli guide](https://bbuchsbaum.github.io/rriscripts/xnat-cli/) |
 
