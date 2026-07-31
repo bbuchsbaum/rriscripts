@@ -1,0 +1,69 @@
+---
+title: rriscripts
+description: Tools for neuroimaging and SLURM-based HPC workflows — qexec, fmriprep, and xnat_cli.
+template: splash
+hero:
+  tagline: Command-line tools for neuroimaging and SLURM-based HPC workflows.
+  actions:
+    - text: Install
+      link: install/
+      icon: right-arrow
+    - text: View on GitHub
+      link: https://github.com/bbuchsbaum/rriscripts
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from "@astrojs/starlight/components";
+
+`rriscripts` is three independent toolkits in one repository. Each one is useful
+on its own, and you can install just the part you need.
+
+<CardGrid>
+  <Card title="qexec" icon="seti:shell">
+    Submit and monitor SLURM jobs: single commands, interactive sessions,
+    generated command grids, and packed command files across array tasks.
+
+    [Read the qexec guide →](qexec/)
+  </Card>
+
+  <Card title="fmriprep" icon="seti:python">
+    Build correct fMRIPrep commands and SLURM array bundles for BIDS datasets,
+    with config files, runtime detection, and retry-only-what-failed reruns.
+
+    [Read the fmriprep guide →](fmriprep/)
+  </Card>
+
+  <Card title="xnat_cli" icon="seti:R">
+    An R command-line interface for XNAT repositories: authenticate, browse
+    projects and scans, and download files, experiments, or whole projects.
+
+    [Read the xnat_cli guide →](xnat-cli/)
+  </Card>
+</CardGrid>
+
+## Which one do I want?
+
+| If you want to… | Use |
+|---|---|
+| Run one command on a compute node | [`qexec.sh`](qexec/workflows/#run-one-batch-command) |
+| Get an interactive session | [`qexec.sh --interactive`](qexec/workflows/#start-an-interactive-session) |
+| Run a parameter sweep | [`batch_exec.sh`](qexec/workflows/#generate-and-submit-a-command-grid) |
+| Submit a file of commands you already have | [`bexec.sh`](qexec/workflows/#batch-a-command-file-across-several-array-tasks) |
+| Watch what a running job is actually doing | [`rjobtop.py`](qexec/monitoring/) |
+| Preprocess a BIDS dataset with fMRIPrep | [`fmriprep_launcher.py`](fmriprep/workflow/) |
+| Re-run only the subjects that failed | [`rerun-failed`](fmriprep/subcommands/#rerun-failed--retry-only-the-failed-subjects) |
+| Pull data out of an XNAT server | [`xnat_cli.R`](xnat-cli/downloading/) |
+
+## Requirements at a glance
+
+Requirements depend on which part you use.
+
+- **qexec** — Bash 3.2+, Python 3.7+, SLURM, and GNU Parallel for packed and
+  batched command-file execution. Tcl/Tk only for the optional GUI frontends.
+- **fmriprep** — Python 3.10+, SLURM, and Singularity/Apptainer or Docker.
+- **xnat_cli** — R with `optparse` and `xnatR`.
+
+## License
+
+[Mozilla Public License 2.0](https://github.com/bbuchsbaum/rriscripts/blob/main/LICENSE).

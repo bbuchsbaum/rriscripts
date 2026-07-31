@@ -1,0 +1,81 @@
+/* rriscripts guide — a restrained slate/amber palette that reads as terminal-adjacent
+   without fighting Starlight's defaults. */
+
+:root {
+  --sl-color-accent-low: #1e2a3a;
+  --sl-color-accent: #d98324;
+  --sl-color-accent-high: #f0c088;
+
+  --sl-color-white: #ffffff;
+  --sl-color-gray-1: #e9edf2;
+  --sl-color-gray-2: #c2cad4;
+  --sl-color-gray-3: #8b95a3;
+  --sl-color-gray-4: #58616e;
+  --sl-color-gray-5: #384250;
+  --sl-color-gray-6: #232b36;
+  --sl-color-black: #171c24;
+}
+
+:root[data-theme="light"] {
+  --sl-color-accent-low: #f5e2c6;
+  --sl-color-accent: #a35c07;
+  --sl-color-accent-high: #4a2a03;
+
+  --sl-color-white: #171c24;
+  --sl-color-gray-1: #232b36;
+  --sl-color-gray-2: #384250;
+  --sl-color-gray-3: #58616e;
+  --sl-color-gray-4: #8b95a3;
+  --sl-color-gray-5: #c2cad4;
+  --sl-color-gray-6: #e9edf2;
+  --sl-color-gray-7: #f3f5f8;
+  --sl-color-black: #ffffff;
+}
+
+/* Tables in this guide are mostly flag references — dense, scannable, and they
+   must never push the page into horizontal scroll on a phone. */
+.sl-markdown-content table {
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+  border-collapse: collapse;
+  font-size: var(--sl-text-sm);
+}
+
+.sl-markdown-content table th {
+  text-align: left;
+  white-space: nowrap;
+  background: var(--sl-color-gray-6);
+}
+
+.sl-markdown-content table td:first-child {
+  white-space: nowrap;
+}
+
+.sl-markdown-content table code {
+  font-size: var(--sl-text-xs);
+}
+
+/* The landing-page tool cards. */
+.tool-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 1rem;
+  margin-block: 1.5rem;
+}
+
+.tool-card {
+  border: 1px solid var(--sl-color-gray-5);
+  border-radius: 0.5rem;
+  padding: 1rem 1.25rem;
+  background: var(--sl-color-gray-6);
+}
+
+.tool-card h3 {
+  margin-top: 0;
+  font-size: var(--sl-text-lg);
+}
+
+.tool-card p:last-child {
+  margin-bottom: 0;
+}
