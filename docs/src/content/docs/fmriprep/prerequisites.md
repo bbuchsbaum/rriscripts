@@ -30,6 +30,42 @@ On a cluster that is not Alliance-run, the shared-storage path will follow a
 different convention entirely — ask whoever administers it.
 :::
 
+## Where these settings go
+
+Each step below ends with a config snippet. They all belong in the same file:
+your **user-level config**, at `~/.config/fmriprep/config.ini`. Create it now,
+before working through the steps:
+
+```bash
+fmriprep_launcher.py init --user
+```
+
+That writes a starter file you then edit. It is a plain INI file with two
+sections — `[defaults]` for fMRIPrep settings and `[slurm]` for job settings —
+and by the end of this page it will look like:
+
+```ini
+# ~/.config/fmriprep/config.ini
+[defaults]
+runtime = singularity
+container = /project/def-piname/shared/bin/fmriprep_25.2.5.sif
+fs_license = /project/def-piname/shared/freesurfer/license.txt
+templateflow_home = /project/def-piname/shared/opt/templateflow
+```
+
+The snippets in each step are fragments of that file — write the `[defaults]`
+header once and put the keys under it, rather than repeating the header.
+
+This file is for **cluster infrastructure that rarely changes**, so you set it up
+once per cluster account and forget it. Dataset-specific values (`bids`, `out`,
+`work`, `subjects`) go in a separate per-dataset `fmriprep.ini` instead — see
+[the workflow page](../workflow/#why-two-config-files) for the split, and
+[the configuration reference](../configuration/) for every key.
+
+Everything here can also be passed as a command-line flag
+(`--container`, `--fs-license`, …), but putting it in the config is what lets
+`slurm-array` later run with no flags at all.
+
 ## 1. An fMRIPrep container image
 
 Run this on a **login node**:
@@ -55,10 +91,9 @@ Put the `.sif` somewhere lab members can share:
 mv fmriprep_${VERSION}.sif /project/def-piname/shared/bin/
 ```
 
-You will set this in your config:
+Then record that path in `~/.config/fmriprep/config.ini`, under `[defaults]`:
 
 ```ini
-[defaults]
 # Replace def-piname with your own allocation account.
 container = /project/def-piname/shared/bin/fmriprep_25.2.5.sif
 ```
@@ -88,10 +123,9 @@ cp license.txt /project/def-piname/shared/freesurfer/license.txt
 chmod a+r /project/def-piname/shared/freesurfer/license.txt
 ```
 
-Then set this once in your user-level config:
+Then record that path in `~/.config/fmriprep/config.ini`, under `[defaults]`:
 
 ```ini
-[defaults]
 # Replace def-piname with your own allocation account.
 fs_license = /project/def-piname/shared/freesurfer/license.txt
 ```
@@ -121,6 +155,14 @@ tfa.get('fsLR')
 
 # Option B - copy from someone who already has it:
 cp -r /project/shared/templateflow ~/.cache/templateflow
+```
+
+If you put the cache somewhere other than the default `~/.cache/templateflow` —
+a shared lab copy, say — record that path in `~/.config/fmriprep/config.ini`,
+under `[defaults]`:
+
+```ini
+templateflow_home = /project/def-piname/shared/opt/templateflow
 ```
 
 The launcher auto-binds your local cache into the container and sets
