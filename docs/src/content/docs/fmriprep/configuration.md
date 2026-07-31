@@ -6,8 +6,18 @@ description: Every [defaults] and [slurm] INI key, plus the environment variable
 INI is the only supported config format. A well-populated project config lets
 `slurm-array` run without long flag lists.
 
+:::note[Paths below are examples]
+`rrg-mypi` and `myuser` are placeholders. Allocation accounts on Digital
+Research Alliance of Canada clusters are named after the PI's username —
+`rrg-<pi-username>` for a RAC allocation, `def-<pi-username>` for a default one
+— so real paths look more like `/project/rrg-jsmith/…`. Substitute your own
+account and username throughout; `sacctmgr show associations user=$USER
+format=account%30` lists the allocations you belong to.
+:::
+
 ```ini
 [defaults]
+# rrg-mypi and myuser are placeholders — use your own allocation and username.
 bids = /project/rrg-mypi/shared/my_study
 out = /project/rrg-mypi/shared/my_study/derivatives/fmriprep
 work = /scratch/myuser/fmriprep_work
@@ -77,7 +87,7 @@ study.
 |---|---|---|---|
 | `partition` | string | `compute` | SLURM partition name |
 | `time` | string | `24:00:00` | Walltime limit (`HH:MM:SS`) |
-| `account` | string | — | SLURM account/allocation (e.g. `def-piname`) |
+| `account` | string | — | SLURM account/allocation. Alliance clusters name these after the PI's username, e.g. `def-jsmith` or `rrg-jsmith` |
 | `job_name` | string | `fmriprep` | SLURM job name |
 | `log_dir` | path | `<script_outdir>/logs` | Directory for SLURM stdout/stderr logs |
 | `script_outdir` | path | `$SCRATCH/<bids-basename>_fmriprep_job` if `$SCRATCH` is set, else `./fmriprep_job` | Where to write the generated sbatch and bundle. Must be writable from compute nodes — `status/` is mutated at runtime. |

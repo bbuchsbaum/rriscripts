@@ -192,6 +192,8 @@ ignored. Set any of the script's default variables:
 
 ```bash
 # ~/.qexecrc
+# rrg-mypi is a placeholder — Alliance allocations are named after the PI's
+# username, e.g. rrg-jsmith or def-jsmith.
 ACCOUNT=rrg-mypi
 NCPUS=4
 MEM=16G

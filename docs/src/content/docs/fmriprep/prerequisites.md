@@ -10,6 +10,26 @@ All three exist because **compute nodes typically have no internet access**. Eac
 step is about getting something onto a filesystem the compute nodes can read,
 while you are still on a login node.
 
+:::note[Paths on this page are examples]
+`def-piname` is a **placeholder for your own allocation**, not a real path. On
+Digital Research Alliance of Canada clusters, allocations are named after the
+PI's username — `def-<pi-username>` for a default allocation, `rrg-<pi-username>`
+for a RAC allocation — so a real path looks more like
+`/project/def-jsmith/shared/bin/`.
+
+Substitute your own account everywhere it appears. To see which allocations you
+belong to:
+
+```bash
+sacctmgr show associations user=$USER format=account%30
+# or, on Alliance clusters:
+groups
+```
+
+On a cluster that is not Alliance-run, the shared-storage path will follow a
+different convention entirely — ask whoever administers it.
+:::
+
 ## 1. An fMRIPrep container image
 
 Run this on a **login node**:
@@ -31,6 +51,7 @@ docker pull nipreps/fmriprep:${VERSION}
 Put the `.sif` somewhere lab members can share:
 
 ```bash
+# Replace def-piname with your own allocation account.
 mv fmriprep_${VERSION}.sif /project/def-piname/shared/bin/
 ```
 
@@ -38,6 +59,7 @@ You will set this in your config:
 
 ```ini
 [defaults]
+# Replace def-piname with your own allocation account.
 container = /project/def-piname/shared/bin/fmriprep_25.2.5.sif
 ```
 
@@ -60,6 +82,7 @@ on a filesystem visible to the compute nodes running your SLURM jobs.
 For a lab-shared setup, use a shared project path:
 
 ```bash
+# Replace def-piname with your own allocation account.
 mkdir -p /project/def-piname/shared/freesurfer
 cp license.txt /project/def-piname/shared/freesurfer/license.txt
 chmod a+r /project/def-piname/shared/freesurfer/license.txt
@@ -69,6 +92,7 @@ Then set this once in your user-level config:
 
 ```ini
 [defaults]
+# Replace def-piname with your own allocation account.
 fs_license = /project/def-piname/shared/freesurfer/license.txt
 ```
 

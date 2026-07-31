@@ -38,6 +38,7 @@ the required values, `fmriprep_launcher.py slurm-array` alone is enough. You can
 also pass values explicitly:
 
 ```bash
+# rrg-mypi is a placeholder — use your own allocation account.
 fmriprep_launcher.py slurm-array \
     --bids /path/to/BIDS \
     --out /path/to/BIDS/derivatives/fmriprep \
