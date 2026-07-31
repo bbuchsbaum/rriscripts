@@ -35,6 +35,34 @@ def default_script_outdir(bids: Optional[Path] = None) -> Path:
     return Path.cwd() / "fmriprep_job"
 
 
+def resolve_work_dir(work: Path | str, configured_work: Optional[str] = None) -> Path:
+    """Resolve the work directory, treating a configured value as a base.
+
+    An absolute --work is used as given. A relative --work is joined onto the
+    configured work directory when there is one, so a config of
+
+        work = /scratch/me/fmriprep-work
+
+    plus --work run2 yields /scratch/me/fmriprep-work/run2 rather than a
+    directory under the current working directory. Work directories belong on
+    scratch, and resolving a bare name against CWD silently puts one wherever
+    the user happened to be standing.
+
+    With no configured base, a relative path still resolves against CWD.
+    """
+    p = Path(work).expanduser()
+    if p.is_absolute():
+        return p.resolve()
+    if configured_work:
+        base = Path(configured_work).expanduser()
+        # When --work is omitted the caller passes the config value straight
+        # through; joining it onto itself would double the path.
+        if p == base:
+            return base.resolve()
+        return (base / p).resolve()
+    return p.resolve()
+
+
 def warn_if_bundle_not_compute_writable(script_outdir: Path) -> None:
     """Warn if script_outdir is unlikely to be writable from compute nodes.
 
@@ -99,7 +127,7 @@ def load_config(config_paths: List[str] | None = None) -> Dict[str, str]:
         Path.cwd() / "fmriprep.ini",
     ]
 
-    config = configparser.ConfigParser(inline_comment_prefixes=('#',))
+    config = configparser.ConfigParser(inline_comment_prefixes=("#",))
     defaults: Dict[str, str] = {}
 
     for path in default_paths + [Path(p) for p in config_paths]:
@@ -196,7 +224,10 @@ def default_resources_from_env() -> Tuple[int, int]:
     """
     import os
 
-    cpus = int(os.environ.get("SLURM_CPUS_PER_TASK", os.environ.get("SLURM_CPUS_ON_NODE", "0")) or 0)
+    cpus = int(
+        os.environ.get("SLURM_CPUS_PER_TASK", os.environ.get("SLURM_CPUS_ON_NODE", "0"))
+        or 0
+    )
     mem_mb = 0
 
     if "SLURM_MEM_PER_CPU" in os.environ and cpus > 0:
@@ -252,12 +283,17 @@ def discover_sif_images(search_dir: Optional[str] = None) -> List[Path]:
     import os
 
     candidates: List[Path] = []
-    chosen_dir = search_dir if search_dir is not None else os.environ.get("FMRIPREP_SIF_DIR")
+    chosen_dir = (
+        search_dir if search_dir is not None else os.environ.get("FMRIPREP_SIF_DIR")
+    )
     if chosen_dir:
         directory = Path(chosen_dir).expanduser()
         if directory.is_dir():
             for path in directory.iterdir():
-                if path.suffix.lower() in (".sif", ".simg") and "fmriprep" in path.name.lower():
+                if (
+                    path.suffix.lower() in (".sif", ".simg")
+                    and "fmriprep" in path.name.lower()
+                ):
                     candidates.append(path)
     return sorted(candidates)
 
@@ -270,7 +306,11 @@ def docker_list_fmriprep_images() -> List[str]:
     if rc != 0:
         return []
     lines = [line.strip() for line in out.splitlines() if line.strip()]
-    return [line for line in lines if re.match(r"^(nipreps|poldracklab|fmriprep)/fmriprep(:|$)", line)]
+    return [
+        line
+        for line in lines
+        if re.match(r"^(nipreps|poldracklab|fmriprep)/fmriprep(:|$)", line)
+    ]
 
 
 def parse_participants_tsv(bids_dir: Path) -> List[str]:
@@ -283,7 +323,11 @@ def parse_participants_tsv(bids_dir: Path) -> List[str]:
             reader = csv.DictReader(tsvfile, delimiter="\t")
             if not reader.fieldnames:
                 return subjects
-            column = "participant_id" if "participant_id" in reader.fieldnames else reader.fieldnames[0]
+            column = (
+                "participant_id"
+                if "participant_id" in reader.fieldnames
+                else reader.fieldnames[0]
+            )
             for row in reader:
                 raw = str(row[column]).strip()
                 if raw:
@@ -292,7 +336,11 @@ def parse_participants_tsv(bids_dir: Path) -> List[str]:
 
 
 def scan_bids_for_subjects(bids_dir: Path) -> List[str]:
-    return sorted(path.name for path in bids_dir.iterdir() if path.is_dir() and path.name.startswith("sub-"))
+    return sorted(
+        path.name
+        for path in bids_dir.iterdir()
+        if path.is_dir() and path.name.startswith("sub-")
+    )
 
 
 def discover_subjects(bids_dir: Path) -> List[str]:

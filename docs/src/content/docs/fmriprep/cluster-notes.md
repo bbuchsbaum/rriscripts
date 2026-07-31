@@ -62,6 +62,9 @@ The trade-off: a batched task is only as fast as its slowest subject, and if one
 subject fails the others in that task still complete. Batch sizes of 2–4 are a
 reasonable starting point for datasets of a few hundred subjects.
 
+For worked examples mapping subject counts onto node counts, see
+[Spreading subjects across nodes](../subcommands/#spreading-subjects-across-nodes).
+
 ## A note on scratch expiry
 
 Most HPC sites purge scratch on a fixed schedule. Because the recommended layout

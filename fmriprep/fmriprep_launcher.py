@@ -55,16 +55,18 @@ from fmriprep_shared import (
     load_config,
     mb_to_human,
     parse_memory_to_mb,
+    resolve_work_dir,
     warn_if_bundle_not_compute_writable,
 )
 
 
 # ---------------------------- Argparse CLI ----------------------------
 
+
 def add_common_args(p: argparse.ArgumentParser, config: Dict[str, str] = None):
     if config is None:
         config = {}
-    
+
     # Helper to show config defaults in help text
     def help_with_default(text, key, fallback=""):
         if key in config:
@@ -72,58 +74,165 @@ def add_common_args(p: argparse.ArgumentParser, config: Dict[str, str] = None):
         elif fallback:
             return f"{text} [default: {fallback}]"
         return text
-    
-    p.add_argument("--bids", type=Path, default=config.get("bids"), required=not config.get("bids"), 
-                   help=help_with_default("Path to BIDS dataset root", "bids"))
-    p.add_argument("--out", type=Path, default=config.get("out"), required=not config.get("out"), 
-                   help=help_with_default("Output directory (usually BIDS/derivatives/fmriprep)", "out"))
-    p.add_argument("--work", type=Path, default=config.get("work"), required=not config.get("work"), 
-                   help=help_with_default("Work directory (scratch)", "work"))
-    p.add_argument("--subjects", nargs="+", default=config.get("subjects", "").split() if config.get("subjects") else None, 
-                   required=not config.get("subjects"), 
-                   help=help_with_default("'all' or a list like sub-01 sub-02 (sub- prefix optional)", "subjects"))
-    p.add_argument("--runtime", choices=["auto","singularity","fmriprep-docker","docker"], 
-                   default=config.get("runtime", "auto"), 
-                   help=help_with_default("Container runtime", "runtime", "auto"))
-    p.add_argument("--container", default=config.get("container", "auto"), 
-                   help=help_with_default("Path to .sif (Singularity) or image:tag (Docker). If 'auto', try to pick", "container", "auto"))
-    p.add_argument("--fs-license", type=Path, default=config.get("fs_license"), 
-                   help=help_with_default("Path to FreeSurfer license.txt (or set FS_LICENSE env var)", "fs_license"))
-    p.add_argument("--templateflow-home", type=Path, default=config.get("templateflow_home"), 
-                   help=help_with_default("Path to TemplateFlow directory (or set TEMPLATEFLOW_HOME env var)", "templateflow_home"))
-    p.add_argument("--nprocs", type=int, default=int(config["nprocs"]) if "nprocs" in config else None, 
-                   help=help_with_default("--nprocs for fMRIPrep", "nprocs", "auto-detect from system/Slurm"))
-    p.add_argument("--omp-threads", type=int, default=int(config["omp_threads"]) if "omp_threads" in config else None, 
-                   help=help_with_default("--omp-nthreads", "omp_threads", "min(8, nprocs)"))
+
+    p.add_argument(
+        "--bids",
+        type=Path,
+        default=config.get("bids"),
+        required=not config.get("bids"),
+        help=help_with_default("Path to BIDS dataset root", "bids"),
+    )
+    p.add_argument(
+        "--out",
+        type=Path,
+        default=config.get("out"),
+        required=not config.get("out"),
+        help=help_with_default(
+            "Output directory (usually BIDS/derivatives/fmriprep)", "out"
+        ),
+    )
+    p.add_argument(
+        "--work",
+        type=Path,
+        default=config.get("work"),
+        required=not config.get("work"),
+        help=help_with_default(
+            "Work directory (scratch). A relative path is taken as a "
+            "subdirectory of the configured work directory",
+            "work",
+        ),
+    )
+    # Remembered so a relative --work resolves against the configured work
+    # directory rather than the current working directory.
+    p.set_defaults(_configured_work=config.get("work"))
+    p.add_argument(
+        "--subjects",
+        nargs="+",
+        default=config.get("subjects", "").split() if config.get("subjects") else None,
+        required=not config.get("subjects"),
+        help=help_with_default(
+            "'all' or a list like sub-01 sub-02 (sub- prefix optional)", "subjects"
+        ),
+    )
+    p.add_argument(
+        "--runtime",
+        choices=["auto", "singularity", "fmriprep-docker", "docker"],
+        default=config.get("runtime", "auto"),
+        help=help_with_default("Container runtime", "runtime", "auto"),
+    )
+    p.add_argument(
+        "--container",
+        default=config.get("container", "auto"),
+        help=help_with_default(
+            "Path to .sif (Singularity) or image:tag (Docker). If 'auto', try to pick",
+            "container",
+            "auto",
+        ),
+    )
+    p.add_argument(
+        "--fs-license",
+        type=Path,
+        default=config.get("fs_license"),
+        help=help_with_default(
+            "Path to FreeSurfer license.txt (or set FS_LICENSE env var)", "fs_license"
+        ),
+    )
+    p.add_argument(
+        "--templateflow-home",
+        type=Path,
+        default=config.get("templateflow_home"),
+        help=help_with_default(
+            "Path to TemplateFlow directory (or set TEMPLATEFLOW_HOME env var)",
+            "templateflow_home",
+        ),
+    )
+    p.add_argument(
+        "--nprocs",
+        type=int,
+        default=int(config["nprocs"]) if "nprocs" in config else None,
+        help=help_with_default(
+            "--nprocs for fMRIPrep", "nprocs", "auto-detect from system/Slurm"
+        ),
+    )
+    p.add_argument(
+        "--omp-threads",
+        type=int,
+        default=int(config["omp_threads"]) if "omp_threads" in config else None,
+        help=help_with_default("--omp-nthreads", "omp_threads", "min(8, nprocs)"),
+    )
     # Parse memory with units support
     default_mem = None
     if "mem_mb" in config:
         try:
             default_mem = parse_memory_to_mb(config["mem_mb"])
         except (ValueError, TypeError) as e:
-            print(f"Warning: could not parse mem_mb '{config['mem_mb']}': {e}", file=sys.stderr)
+            print(
+                f"Warning: could not parse mem_mb '{config['mem_mb']}': {e}",
+                file=sys.stderr,
+            )
             default_mem = int(config["mem_mb"])
-    p.add_argument("--mem-mb", type=parse_memory_to_mb, default=default_mem,
-                   help=help_with_default("--mem-mb (supports units: 32G, 760000M)", "mem_mb", "about 90 percent of available"))
-    p.add_argument("--skip-bids-validation", action="store_true", 
-                   default=config.get("skip_bids_validation", "").lower() == "true", 
-                   help=help_with_default("Pass --skip-bids-validation", "skip_bids_validation"))
-    p.add_argument("--output-spaces", type=str, default=config.get("output_spaces"), 
-                   help=help_with_default('Output spaces e.g. "MNI152NLin2009cAsym:res-2 T1w fsnative"', "output_spaces"))
-    p.add_argument("--use-aroma", action="store_true",
-                   default=config.get("use_aroma", "").lower() == "true",
-                   help=help_with_default("Use ICA-AROMA (DEPRECATED: removed in fMRIPrep >= 23.1.0)", "use_aroma"))
-    p.add_argument("--cifti-output", action="store_true", 
-                   default=config.get("cifti_output", "").lower() == "true",
-                   help=help_with_default("Generate CIFTI outputs", "cifti_output"))
-    p.add_argument("--fs-reconall", action="store_true", 
-                   default=config.get("fs_reconall", "").lower() == "true", 
-                   help=help_with_default("Run FreeSurfer recon-all", "fs_reconall", "off"))
-    p.add_argument("--use-syn-sdc", action="store_true", 
-                   default=config.get("use_syn_sdc", "").lower() == "true", 
-                   help=help_with_default("Enable SyN-based fieldmap-less distortion correction", "use_syn_sdc"))
-    p.add_argument("--extra", type=str, default=config.get("extra", ""), 
-                   help=help_with_default("Extra flags to append to fMRIPrep (quoted string)", "extra"))
+    p.add_argument(
+        "--mem-mb",
+        type=parse_memory_to_mb,
+        default=default_mem,
+        help=help_with_default(
+            "--mem-mb (supports units: 32G, 760000M)",
+            "mem_mb",
+            "about 90 percent of available",
+        ),
+    )
+    p.add_argument(
+        "--skip-bids-validation",
+        action="store_true",
+        default=config.get("skip_bids_validation", "").lower() == "true",
+        help=help_with_default("Pass --skip-bids-validation", "skip_bids_validation"),
+    )
+    p.add_argument(
+        "--output-spaces",
+        type=str,
+        default=config.get("output_spaces"),
+        help=help_with_default(
+            'Output spaces e.g. "MNI152NLin2009cAsym:res-2 T1w fsnative"',
+            "output_spaces",
+        ),
+    )
+    p.add_argument(
+        "--use-aroma",
+        action="store_true",
+        default=config.get("use_aroma", "").lower() == "true",
+        help=help_with_default(
+            "Use ICA-AROMA (DEPRECATED: removed in fMRIPrep >= 23.1.0)", "use_aroma"
+        ),
+    )
+    p.add_argument(
+        "--cifti-output",
+        action="store_true",
+        default=config.get("cifti_output", "").lower() == "true",
+        help=help_with_default("Generate CIFTI outputs", "cifti_output"),
+    )
+    p.add_argument(
+        "--fs-reconall",
+        action="store_true",
+        default=config.get("fs_reconall", "").lower() == "true",
+        help=help_with_default("Run FreeSurfer recon-all", "fs_reconall", "off"),
+    )
+    p.add_argument(
+        "--use-syn-sdc",
+        action="store_true",
+        default=config.get("use_syn_sdc", "").lower() == "true",
+        help=help_with_default(
+            "Enable SyN-based fieldmap-less distortion correction", "use_syn_sdc"
+        ),
+    )
+    p.add_argument(
+        "--extra",
+        type=str,
+        default=config.get("extra", ""),
+        help=help_with_default(
+            "Extra flags to append to fMRIPrep (quoted string)", "extra"
+        ),
+    )
+
 
 def choose_container(runtime: str, container_arg: str) -> str:
     if container_arg != "auto":
@@ -135,21 +244,29 @@ def choose_container(runtime: str, container_arg: str) -> str:
                 images = discover_sif_images(str(container_path))
                 if images:
                     # Return the most recent one
-                    latest = sorted(images, key=lambda p: Path(p).stat().st_mtime, reverse=True)[0]
+                    latest = sorted(
+                        images, key=lambda p: Path(p).stat().st_mtime, reverse=True
+                    )[0]
                     return str(latest)
                 else:
-                    raise RuntimeError(f"No .sif/.simg files found in directory: {container_path}")
+                    raise RuntimeError(
+                        f"No .sif/.simg files found in directory: {container_path}"
+                    )
             elif not container_path.exists():
                 raise RuntimeError(f"Container file does not exist: {container_path}")
         return container_arg
-    
+
     if runtime == "singularity":
         sif_dir = os.environ.get("FMRIPREP_SIF_DIR")
         images = discover_sif_images(sif_dir)
         if images:
-            latest = sorted(images, key=lambda p: Path(p).stat().st_mtime, reverse=True)[0]
+            latest = sorted(
+                images, key=lambda p: Path(p).stat().st_mtime, reverse=True
+            )[0]
             return str(latest)
-        raise RuntimeError("No fMRIPrep .sif/.simg found. Set FMRIPREP_SIF_DIR or pass --container /path/file.sif")
+        raise RuntimeError(
+            "No fMRIPrep .sif/.simg found. Set FMRIPREP_SIF_DIR or pass --container /path/file.sif"
+        )
     elif runtime in ("docker", "fmriprep-docker"):
         imgs = docker_list_fmriprep_images()
         if imgs:
@@ -158,10 +275,11 @@ def choose_container(runtime: str, container_arg: str) -> str:
     else:
         raise RuntimeError(f"Unsupported runtime: {runtime}")
 
+
 def fill_defaults(args):
     bids: Path = args.bids.expanduser().resolve()
     out: Path = args.out.expanduser().resolve()
-    work: Path = args.work.expanduser().resolve()
+    work: Path = resolve_work_dir(args.work, getattr(args, "_configured_work", None))
 
     subjects = resolve_subjects_arg(bids, args.subjects)
     if not subjects:
@@ -170,18 +288,34 @@ def fill_defaults(args):
     runtime = detect_runtime(args.runtime)
     container = choose_container(runtime, args.container)
 
-    fs_license = Path(os.environ.get("FS_LICENSE", "")) if args.fs_license is None else args.fs_license
+    fs_license = (
+        Path(os.environ.get("FS_LICENSE", ""))
+        if args.fs_license is None
+        else args.fs_license
+    )
     if not fs_license or not fs_license.exists():
-        raise SystemExit("FreeSurfer license not found. Set FS_LICENSE or pass --fs-license /path/to/license.txt")
+        raise SystemExit(
+            "FreeSurfer license not found. Set FS_LICENSE or pass --fs-license /path/to/license.txt"
+        )
 
     cpus_auto, mem_auto = default_resources_from_env()
     nprocs = args.nprocs or max(1, cpus_auto)
     omp_threads = args.omp_threads or max(1, min(8, nprocs))
     mem_mb = args.mem_mb or mem_auto
 
-    return subjects, runtime, Path(container), fs_license.resolve(), omp_threads, nprocs, mem_mb
+    return (
+        subjects,
+        runtime,
+        Path(container),
+        fs_license.resolve(),
+        omp_threads,
+        nprocs,
+        mem_mb,
+    )
+
 
 # ---------------------------- Commands ----------------------------
+
 
 def _build_user_config():
     """Build a user-level config template (infrastructure only, no dataset paths)."""
@@ -359,9 +493,11 @@ def cmd_init(args):
         print(f"Wrote {outfile}")
         if global_cfg:
             sources = []
-            for p in [Path.home() / ".config" / "fmriprep" / "config.ini",
-                       Path.home() / ".fmriprep.ini",
-                       Path("/etc/fmriprep/config.ini")]:
+            for p in [
+                Path.home() / ".config" / "fmriprep" / "config.ini",
+                Path.home() / ".fmriprep.ini",
+                Path("/etc/fmriprep/config.ini"),
+            ]:
                 if p.exists():
                     sources.append(str(p))
             if sources:
@@ -428,7 +564,9 @@ def cmd_probe(_args):
         else:
             print(f"No fMRIPrep images found in $FMRIPREP_SIF_DIR ({sif_dir})")
     elif not container_cfg:
-        print("No container configured (set 'container' in config or $FMRIPREP_SIF_DIR)")
+        print(
+            "No container configured (set 'container' in config or $FMRIPREP_SIF_DIR)"
+        )
 
     # --- Docker ---
     docker_imgs = docker_list_fmriprep_images()
@@ -439,22 +577,43 @@ def cmd_probe(_args):
     else:
         print("No local Docker fMRIPrep images found (or Docker not installed).")
 
+
 def cmd_print(args):
-    subjects, runtime, container, fs_license, omp_threads, nprocs, mem_mb = fill_defaults(args)
+    (
+        subjects,
+        runtime,
+        container,
+        fs_license,
+        omp_threads,
+        nprocs,
+        mem_mb,
+    ) = fill_defaults(args)
     # Use resolved paths from fill_defaults
     bids = args.bids.expanduser().resolve()
     out = args.out.expanduser().resolve()
-    work = args.work.expanduser().resolve()
-    
+    work = resolve_work_dir(args.work, getattr(args, "_configured_work", None))
+
     cfg = BuildConfig(
-        bids=bids, out=out, work=work, subjects=subjects,
-        container_runtime=runtime, container=str(container),
-        fs_license=fs_license, 
-        templateflow_home=args.templateflow_home.expanduser().resolve() if args.templateflow_home else None,
-        omp_threads=omp_threads, nprocs=nprocs, mem_mb=mem_mb,
-        extra=args.extra, skip_bids_validation=args.skip_bids_validation,
-        output_spaces=args.output_spaces, use_aroma=args.use_aroma, cifti_output=args.cifti_output,
-        fs_reconall=args.fs_reconall, use_syn_sdc=args.use_syn_sdc
+        bids=bids,
+        out=out,
+        work=work,
+        subjects=subjects,
+        container_runtime=runtime,
+        container=str(container),
+        fs_license=fs_license,
+        templateflow_home=args.templateflow_home.expanduser().resolve()
+        if args.templateflow_home
+        else None,
+        omp_threads=omp_threads,
+        nprocs=nprocs,
+        mem_mb=mem_mb,
+        extra=args.extra,
+        skip_bids_validation=args.skip_bids_validation,
+        output_spaces=args.output_spaces,
+        use_aroma=args.use_aroma,
+        cifti_output=args.cifti_output,
+        fs_reconall=args.fs_reconall,
+        use_syn_sdc=args.use_syn_sdc,
     )
     errors = preflight_check(cfg)
     if errors:
@@ -465,46 +624,71 @@ def cmd_print(args):
         cmd = build_fmriprep_command(cfg, sub)
         print("$ " + " ".join([str(c) for c in cmd]))
 
+
 def cmd_slurm_array(args):
-    subjects, runtime, container, fs_license, omp_threads, nprocs, mem_mb = fill_defaults(args)
+    (
+        subjects,
+        runtime,
+        container,
+        fs_license,
+        omp_threads,
+        nprocs,
+        mem_mb,
+    ) = fill_defaults(args)
     # Use resolved paths from fill_defaults
     bids = args.bids.expanduser().resolve()
     out = args.out.expanduser().resolve()
-    work = args.work.expanduser().resolve()
-    
+    work = resolve_work_dir(args.work, getattr(args, "_configured_work", None))
+
     # Handle subject batching
     subjects_per_job = max(1, args.subjects_per_job)
-    
+
     # Adjust resources if batching multiple subjects
     # Since we run subjects in parallel with xargs, we need total_resources = per_subject × num_subjects
     if subjects_per_job > 1:
         # Simple multiplication: each subject needs full resources
         adjusted_nprocs = nprocs * subjects_per_job
         adjusted_mem = mem_mb * subjects_per_job
-        
+
         print(f"Batching {subjects_per_job} subjects per job")
         print(f"Total job resources: {adjusted_nprocs} CPUs, {adjusted_mem} MB memory")
         print(f"  ({nprocs} CPUs, {mem_mb} MB per subject)")
     else:
         adjusted_mem = mem_mb
         adjusted_nprocs = nprocs
-    
+
     cfg = BuildConfig(
-        bids=bids, out=out, work=work, subjects=subjects,
-        container_runtime=runtime, container=str(container),
+        bids=bids,
+        out=out,
+        work=work,
+        subjects=subjects,
+        container_runtime=runtime,
+        container=str(container),
         fs_license=fs_license,
-        templateflow_home=args.templateflow_home.expanduser().resolve() if args.templateflow_home else None,
-        omp_threads=omp_threads, nprocs=adjusted_nprocs, mem_mb=adjusted_mem,
-        extra=args.extra, skip_bids_validation=args.skip_bids_validation,
-        output_spaces=args.output_spaces, use_aroma=args.use_aroma, cifti_output=args.cifti_output,
-        fs_reconall=args.fs_reconall, use_syn_sdc=args.use_syn_sdc
+        templateflow_home=args.templateflow_home.expanduser().resolve()
+        if args.templateflow_home
+        else None,
+        omp_threads=omp_threads,
+        nprocs=adjusted_nprocs,
+        mem_mb=adjusted_mem,
+        extra=args.extra,
+        skip_bids_validation=args.skip_bids_validation,
+        output_spaces=args.output_spaces,
+        use_aroma=args.use_aroma,
+        cifti_output=args.cifti_output,
+        fs_reconall=args.fs_reconall,
+        use_syn_sdc=args.use_syn_sdc,
     )
     errors = preflight_check(cfg)
     if errors:
         for e in errors:
             print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-    script_outdir = args.script_outdir if args.script_outdir is not None else default_script_outdir(bids)
+    script_outdir = (
+        args.script_outdir
+        if args.script_outdir is not None
+        else default_script_outdir(bids)
+    )
     out_dir = script_outdir.expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     warn_if_bundle_not_compute_writable(out_dir)
@@ -512,7 +696,7 @@ def cmd_slurm_array(args):
     # Create subject batches
     subj_file = out_dir / "subjects.txt"
     batches = write_subject_batches(subj_file, subjects, subjects_per_job)
-    
+
     if subjects_per_job > 1:
         print(f"Created {len(batches)} job batches from {len(subjects)} subjects")
 
@@ -531,7 +715,10 @@ def cmd_slurm_array(args):
     elif args.mem and args.mem.lower() == "none":
         mem_spec = None
     else:
-        mem_spec = args.mem or mb_to_human(mem_mb)
+        # adjusted_mem, not mem_mb: with --subjects-per-job N the task runs N
+        # subjects concurrently and fMRIPrep is told it has N x the memory, so
+        # the SLURM request has to scale too or the task is OOM-killed.
+        mem_spec = args.mem or mb_to_human(adjusted_mem)
 
     text = create_slurm_script(
         cfg=cfg,
@@ -581,7 +768,11 @@ def cmd_slurm_array(args):
 def cmd_rerun_failed(args):
     manifest_path = args.manifest.expanduser().resolve()
     manifest = json.loads(manifest_path.read_text())
-    status_dir = args.status_dir.expanduser().resolve() if args.status_dir else Path(manifest["job_bundle"]["status_dir"]).expanduser().resolve()
+    status_dir = (
+        args.status_dir.expanduser().resolve()
+        if args.status_dir
+        else Path(manifest["job_bundle"]["status_dir"]).expanduser().resolve()
+    )
     failed_subjects = failed_subjects_from_status_dir(status_dir)
 
     if not failed_subjects:
@@ -591,7 +782,11 @@ def cmd_rerun_failed(args):
     cfg = build_config_from_manifest(manifest, failed_subjects)
     slurm = manifest["slurm"]
     subjects_per_job = args.subjects_per_job or int(slurm.get("subjects_per_job", 1))
-    out_dir = args.script_outdir.expanduser().resolve() if args.script_outdir else manifest_path.parent / "rerun_failed_job"
+    out_dir = (
+        args.script_outdir.expanduser().resolve()
+        if args.script_outdir
+        else manifest_path.parent / "rerun_failed_job"
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
 
     subj_file = out_dir / "subjects.txt"
@@ -648,28 +843,38 @@ def cmd_rerun_failed(args):
     print("\nSubmit with:")
     print(f"  sbatch {script_path}")
 
+
 def _validate_templateflow(tf_path: Path):
     """Warn if TemplateFlow directory looks empty or missing key templates."""
     if not tf_path.exists():
         print(f"\n⚠ TemplateFlow directory does not exist yet: {tf_path}")
-        print("  It will be created, but compute nodes without internet cannot download templates.")
+        print(
+            "  It will be created, but compute nodes without internet cannot download templates."
+        )
         print("  Pre-populate on a login node with:")
-        print(f"    python -c \"import templateflow.api as tfa; tfa.get('MNI152NLin2009cAsym')\"")
+        print(
+            f"    python -c \"import templateflow.api as tfa; tfa.get('MNI152NLin2009cAsym')\""
+        )
         print(f"  Or copy an existing TemplateFlow cache to: {tf_path}\n")
         return
     # Check for at least one template directory
     subdirs = [p for p in tf_path.iterdir() if p.is_dir() and p.name.startswith("tpl-")]
     if not subdirs:
         print(f"\n⚠ TemplateFlow directory exists but contains no templates: {tf_path}")
-        print("  fMRIPrep will fail on air-gapped compute nodes without cached templates.")
+        print(
+            "  fMRIPrep will fail on air-gapped compute nodes without cached templates."
+        )
         print("  Pre-populate on a login node with:")
-        print(f"    python -c \"import templateflow.api as tfa; tfa.get('MNI152NLin2009cAsym')\"")
+        print(
+            f"    python -c \"import templateflow.api as tfa; tfa.get('MNI152NLin2009cAsym')\""
+        )
         print(f"  Or copy an existing TemplateFlow cache to: {tf_path}\n")
     else:
         print(f"✓ TemplateFlow: {len(subdirs)} template(s) found in {tf_path}")
 
 
 # -------------------- Review wizard helpers --------------------
+
 
 def _format_subjects(subjects, all_subjects):
     """Compact subject display string."""
@@ -679,13 +884,20 @@ def _format_subjects(subjects, all_subjects):
         return f"all ({len(subjects)} subjects)"
     if len(subjects) <= 4:
         return f"{', '.join(subjects)} ({len(subjects)} of {len(all_subjects)})"
-    return f"{subjects[0]}, ..., {subjects[-1]} ({len(subjects)} of {len(all_subjects)})"
+    return (
+        f"{subjects[0]}, ..., {subjects[-1]} ({len(subjects)} of {len(all_subjects)})"
+    )
 
 
 def _print_review_table(fields):
     """Print numbered summary table with section headers."""
-    groups = {0: "Paths", 4: "Container & Environment", 8: "Resources",
-              11: "fMRIPrep Flags", 17: "SLURM Settings"}
+    groups = {
+        0: "Paths",
+        4: "Container & Environment",
+        8: "Resources",
+        11: "fMRIPrep Flags",
+        17: "SLURM Settings",
+    }
     w = 70
     print(f"\n{'=' * w}")
     print("  fMRIPrep Configuration Review")
@@ -694,15 +906,15 @@ def _print_review_table(fields):
         if i in groups:
             print(f"\n  --- {groups[i]} ---")
         marker = " "
-        if ftype in ('dir', 'file') and value and not Path(value).expanduser().exists():
+        if ftype in ("dir", "file") and value and not Path(value).expanduser().exists():
             marker = "!"
-        if key in ('bids', 'container', 'fs_license') and not value:
+        if key in ("bids", "container", "fs_license") and not value:
             marker = "!"
-        if key == 'subjects' and '(none' in value:
+        if key == "subjects" and "(none" in value:
             marker = "!"
         # truncate long paths for display
         if len(value) > 48:
-            display = "..." + value[-(48-3):]
+            display = "..." + value[-(48 - 3) :]
         else:
             display = value
         print(f"  {marker}{i+1:>2}. {label:<24s} {display}")
@@ -715,24 +927,30 @@ def cmd_wizard_review(args, config):
     # --- Phase 1: Resolve all defaults silently ---
 
     # BIDS directory
-    bids_str = config.get('bids', '')
+    bids_str = config.get("bids", "")
     if bids_str:
         bids = Path(bids_str).expanduser().resolve()
     else:
         bids = Path.cwd()
     # If CWD doesn't look like BIDS, prompt once
-    if not bids.is_dir() or not any(p.name.startswith('sub-') for p in bids.iterdir() if p.is_dir()):
+    if not bids.is_dir() or not any(
+        p.name.startswith("sub-") for p in bids.iterdir() if p.is_dir()
+    ):
         raw = input(f"BIDS directory [{bids}]: ").strip()
         if raw:
             bids = Path(raw).expanduser().resolve()
 
-    out = Path(config.get('out', str(bids / "derivatives" / "fmriprep"))).expanduser().resolve()
-    work = Path(config.get('work', str(bids / "work_fmriprep"))).expanduser().resolve()
+    out = (
+        Path(config.get("out", str(bids / "derivatives" / "fmriprep")))
+        .expanduser()
+        .resolve()
+    )
+    work = Path(config.get("work", str(bids / "work_fmriprep"))).expanduser().resolve()
 
     # Subjects
     all_subjects = discover_subjects(bids) if bids.is_dir() else []
-    cfg_subs = config.get('subjects', '').strip()
-    if cfg_subs and cfg_subs.lower() != 'all':
+    cfg_subs = config.get("subjects", "").strip()
+    if cfg_subs and cfg_subs.lower() != "all":
         try:
             subjects = resolve_subjects_arg(bids, cfg_subs.split())
         except Exception:
@@ -741,101 +959,124 @@ def cmd_wizard_review(args, config):
         subjects = all_subjects
 
     # Runtime + container
-    runtime_cfg = config.get('runtime', 'auto')
+    runtime_cfg = config.get("runtime", "auto")
     try:
         runtime = detect_runtime(runtime_cfg)
     except RuntimeError:
-        runtime = 'singularity'
+        runtime = "singularity"
 
-    container_cfg = config.get('container', 'auto')
-    container = ''
-    if container_cfg and container_cfg != 'auto':
+    container_cfg = config.get("container", "auto")
+    container = ""
+    if container_cfg and container_cfg != "auto":
         cp = Path(container_cfg).expanduser()
         if cp.is_file():
             container = str(cp)
         elif cp.is_dir():
             imgs = discover_sif_images(str(cp))
-            container = str(sorted(imgs, key=lambda p: p.stat().st_mtime, reverse=True)[0]) if imgs else ''
+            container = (
+                str(sorted(imgs, key=lambda p: p.stat().st_mtime, reverse=True)[0])
+                if imgs
+                else ""
+            )
     if not container:
         try:
-            container = choose_container(runtime, 'auto')
+            container = choose_container(runtime, "auto")
         except RuntimeError:
-            container = ''
+            container = ""
 
     # FreeSurfer license
-    fs_str = config.get('fs_license', os.environ.get('FS_LICENSE', ''))
-    fs_license = str(Path(fs_str).expanduser()) if fs_str else ''
+    fs_str = config.get("fs_license", os.environ.get("FS_LICENSE", ""))
+    fs_license = str(Path(fs_str).expanduser()) if fs_str else ""
 
     # TemplateFlow
-    tf_str = config.get('templateflow_home',
-                        os.environ.get('TEMPLATEFLOW_HOME',
-                                       str(Path.home() / ".cache" / "templateflow")))
+    tf_str = config.get(
+        "templateflow_home",
+        os.environ.get(
+            "TEMPLATEFLOW_HOME", str(Path.home() / ".cache" / "templateflow")
+        ),
+    )
     templateflow_home = str(Path(tf_str).expanduser())
 
     # Resources
     cpus_auto, mem_auto = default_resources_from_env()
-    nprocs = int(config.get('nprocs', str(cpus_auto)))
-    omp_threads = int(config.get('omp_threads', str(min(8, nprocs))))
-    mem_mb = parse_memory_to_mb(config['mem_mb']) if 'mem_mb' in config else mem_auto
+    nprocs = int(config.get("nprocs", str(cpus_auto)))
+    omp_threads = int(config.get("omp_threads", str(min(8, nprocs))))
+    mem_mb = parse_memory_to_mb(config["mem_mb"]) if "mem_mb" in config else mem_auto
 
     # fMRIPrep flags
-    output_spaces = config.get('output_spaces', 'MNI152NLin2009cAsym:res-2 T1w')
-    skip_bids = config.get('skip_bids_validation', 'true').lower() == 'true'
-    cifti_output = config.get('cifti_output', 'false').lower() == 'true'
-    fs_reconall = config.get('fs_reconall', 'true').lower() == 'true'
-    use_syn_sdc = config.get('use_syn_sdc', 'false').lower() == 'true'
-    extra = config.get('extra', '')
+    output_spaces = config.get("output_spaces", "MNI152NLin2009cAsym:res-2 T1w")
+    skip_bids = config.get("skip_bids_validation", "true").lower() == "true"
+    cifti_output = config.get("cifti_output", "false").lower() == "true"
+    fs_reconall = config.get("fs_reconall", "true").lower() == "true"
+    use_syn_sdc = config.get("use_syn_sdc", "false").lower() == "true"
+    extra = config.get("extra", "")
 
     # SLURM
-    partition = config.get('slurm_partition', 'compute')
-    time_limit = config.get('slurm_time', '24:00:00')
-    account = config.get('slurm_account', '')
-    job_name = config.get('slurm_job_name', 'fmriprep')
-    email = config.get('slurm_email', '')
-    mail_type = config.get('slurm_mail_type', '')
-    no_mem = config.get('slurm_no_mem', config.get('no_mem', 'false')).lower().startswith('true')
-    log_dir = config.get('slurm_log_dir', '')
+    partition = config.get("slurm_partition", "compute")
+    time_limit = config.get("slurm_time", "24:00:00")
+    account = config.get("slurm_account", "")
+    job_name = config.get("slurm_job_name", "fmriprep")
+    email = config.get("slurm_email", "")
+    mail_type = config.get("slurm_mail_type", "")
+    no_mem = (
+        config.get("slurm_no_mem", config.get("no_mem", "false"))
+        .lower()
+        .startswith("true")
+    )
+    log_dir = config.get("slurm_log_dir", "")
 
     # --- Phase 2: Build mutable field table ---
     # (key, label, value, type, choices)
     fields = [
         # Paths 0-3
-        ('bids',              'BIDS directory',        str(bids),                  'dir',      None),
-        ('out',               'Output directory',      str(out),                   'dir',      None),
-        ('work',              'Work directory',         str(work),                  'dir',      None),
-        ('subjects',          'Subjects',              _format_subjects(subjects, all_subjects), 'subjects', None),
+        ("bids", "BIDS directory", str(bids), "dir", None),
+        ("out", "Output directory", str(out), "dir", None),
+        ("work", "Work directory", str(work), "dir", None),
+        (
+            "subjects",
+            "Subjects",
+            _format_subjects(subjects, all_subjects),
+            "subjects",
+            None,
+        ),
         # Container 4-7
-        ('runtime',           'Container runtime',     runtime,                    'choice',   ['singularity','docker','fmriprep-docker']),
-        ('container',         'Container image',       container,                  'file',     None),
-        ('fs_license',        'FS license',            fs_license,                 'file',     None),
-        ('templateflow_home', 'TemplateFlow dir',      templateflow_home,          'dir',      None),
+        (
+            "runtime",
+            "Container runtime",
+            runtime,
+            "choice",
+            ["singularity", "docker", "fmriprep-docker"],
+        ),
+        ("container", "Container image", container, "file", None),
+        ("fs_license", "FS license", fs_license, "file", None),
+        ("templateflow_home", "TemplateFlow dir", templateflow_home, "dir", None),
         # Resources 8-10
-        ('nprocs',            'nprocs',                str(nprocs),                'int',      None),
-        ('omp_threads',       'omp-nthreads',          str(omp_threads),           'int',      None),
-        ('mem_mb',            'mem-mb',                str(mem_mb),                'int',      None),
+        ("nprocs", "nprocs", str(nprocs), "int", None),
+        ("omp_threads", "omp-nthreads", str(omp_threads), "int", None),
+        ("mem_mb", "mem-mb", str(mem_mb), "int", None),
         # Flags 11-16
-        ('output_spaces',     'Output spaces',         output_spaces,              'str',      None),
-        ('skip_bids',         'Skip BIDS validation',  str(skip_bids).lower(),     'bool',     None),
-        ('cifti_output',      'CIFTI output 91k',      str(cifti_output).lower(),  'bool',     None),
-        ('fs_reconall',       'FreeSurfer recon-all',   str(fs_reconall).lower(),   'bool',     None),
-        ('use_syn_sdc',       'SyN SDC',               str(use_syn_sdc).lower(),   'bool',     None),
-        ('extra',             'Extra flags',            extra,                      'str',      None),
+        ("output_spaces", "Output spaces", output_spaces, "str", None),
+        ("skip_bids", "Skip BIDS validation", str(skip_bids).lower(), "bool", None),
+        ("cifti_output", "CIFTI output 91k", str(cifti_output).lower(), "bool", None),
+        ("fs_reconall", "FreeSurfer recon-all", str(fs_reconall).lower(), "bool", None),
+        ("use_syn_sdc", "SyN SDC", str(use_syn_sdc).lower(), "bool", None),
+        ("extra", "Extra flags", extra, "str", None),
         # SLURM 17-24
-        ('partition',         'SLURM partition',       partition,                  'str',      None),
-        ('time_limit',        'SLURM walltime',        time_limit,                 'str',      None),
-        ('account',           'SLURM account',         account,                    'str',      None),
-        ('job_name',          'SLURM job name',        job_name,                   'str',      None),
-        ('email',             'Notification email',    email,                      'str',      None),
-        ('mail_type',         'Mail type',             mail_type,                  'str',      None),
-        ('no_mem',            'Omit SLURM --mem',      str(no_mem).lower(),        'bool',     None),
-        ('log_dir',           'Log directory',         log_dir,                    'dir',      None),
+        ("partition", "SLURM partition", partition, "str", None),
+        ("time_limit", "SLURM walltime", time_limit, "str", None),
+        ("account", "SLURM account", account, "str", None),
+        ("job_name", "SLURM job name", job_name, "str", None),
+        ("email", "Notification email", email, "str", None),
+        ("mail_type", "Mail type", mail_type, "str", None),
+        ("no_mem", "Omit SLURM --mem", str(no_mem).lower(), "bool", None),
+        ("log_dir", "Log directory", log_dir, "dir", None),
     ]
 
     def fval(key):
         for k, _, v, _, _ in fields:
             if k == key:
                 return v
-        return ''
+        return ""
 
     def fset(key, new_val):
         for i, (k, label, _, ftype, choices) in enumerate(fields):
@@ -850,20 +1091,24 @@ def cmd_wizard_review(args, config):
         # Flag critical missing values
         missing = []
         for i, (key, label, value, ftype, _) in enumerate(fields):
-            if key == 'bids' and (not value or not Path(value).expanduser().is_dir()):
+            if key == "bids" and (not value or not Path(value).expanduser().is_dir()):
                 missing.append(f"  {i+1}. {label}")
-            elif key == 'container' and not value:
+            elif key == "container" and not value:
                 missing.append(f"  {i+1}. {label}")
-            elif key == 'fs_license' and (not value or not Path(value).expanduser().exists()):
+            elif key == "fs_license" and (
+                not value or not Path(value).expanduser().exists()
+            ):
                 missing.append(f"  {i+1}. {label}")
-            elif key == 'subjects' and '(none' in value:
+            elif key == "subjects" and "(none" in value:
                 missing.append(f"  {i+1}. {label}")
         if missing:
             print("  [!] Needs attention:")
             for m in missing:
                 print(f"      {m}")
 
-        raw = input("\n  Edit field numbers (e.g. '5 9'), or Enter to proceed: ").strip()
+        raw = input(
+            "\n  Edit field numbers (e.g. '5 9'), or Enter to proceed: "
+        ).strip()
         if not raw:
             break
 
@@ -880,10 +1125,10 @@ def cmd_wizard_review(args, config):
             idx = num - 1
             key, label, old_val, ftype, choices = fields[idx]
 
-            if ftype == 'bool':
-                new_val = 'false' if old_val == 'true' else 'true'
+            if ftype == "bool":
+                new_val = "false" if old_val == "true" else "true"
                 print(f"  {label}: {old_val} -> {new_val}")
-            elif ftype == 'choice':
+            elif ftype == "choice":
                 print(f"  {label}:")
                 for ci, c in enumerate(choices, 1):
                     star = " *" if c == old_val else ""
@@ -893,9 +1138,9 @@ def cmd_wizard_review(args, config):
                     new_val = choices[int(ch) - 1]
                 else:
                     new_val = old_val
-            elif ftype == 'dir':
+            elif ftype == "dir":
                 new_val = input(f"  {label} [{old_val}]: ").strip() or old_val
-            elif ftype == 'file':
+            elif ftype == "file":
                 new_val = input(f"  {label} [{old_val}]: ").strip() or old_val
                 p = Path(new_val).expanduser()
                 if p.is_dir():
@@ -909,23 +1154,23 @@ def cmd_wizard_review(args, config):
                             new_val = str(imgs[int(ch) - 1])
                 elif not p.exists():
                     print(f"  Warning: {new_val} does not exist")
-            elif ftype == 'int':
+            elif ftype == "int":
                 v = input(f"  {label} [{old_val}]: ").strip() or old_val
                 try:
                     new_val = str(int(v))
                 except ValueError:
                     print(f"  Invalid integer, keeping {old_val}")
                     new_val = old_val
-            elif ftype == 'subjects':
+            elif ftype == "subjects":
                 print(f"  Available: {len(all_subjects)} subjects")
                 print("  Enter: 'all', space-separated sub-IDs, or range '1-10'")
                 v = input("  Subjects [all]: ").strip() or "all"
-                if v.lower() == 'all':
+                if v.lower() == "all":
                     subjects = all_subjects
-                elif '-' in v and not v.startswith('sub-'):
+                elif "-" in v and not v.startswith("sub-"):
                     try:
-                        start, end = v.split('-', 1)
-                        subjects = all_subjects[int(start)-1:int(end)]
+                        start, end = v.split("-", 1)
+                        subjects = all_subjects[int(start) - 1 : int(end)]
                     except (ValueError, IndexError):
                         print("  Invalid range, keeping all.")
                         subjects = all_subjects
@@ -937,7 +1182,7 @@ def cmd_wizard_review(args, config):
                             if 0 <= idx2 < len(all_subjects):
                                 sel.append(all_subjects[idx2])
                         else:
-                            t = tok if tok.startswith('sub-') else f'sub-{tok}'
+                            t = tok if tok.startswith("sub-") else f"sub-{tok}"
                             if t in all_subjects:
                                 sel.append(t)
                     subjects = sel if sel else all_subjects
@@ -948,43 +1193,53 @@ def cmd_wizard_review(args, config):
             fields[idx] = (key, label, new_val, ftype, choices)
 
             # Cascade: bids change -> re-discover subjects
-            if key == 'bids':
+            if key == "bids":
                 new_bids = Path(new_val).expanduser().resolve()
                 if new_bids.is_dir():
                     all_subjects = discover_subjects(new_bids)
                     subjects = all_subjects
-                    fset('subjects', _format_subjects(subjects, all_subjects))
+                    fset("subjects", _format_subjects(subjects, all_subjects))
                     # update default out
-                    fset('out', str(new_bids / "derivatives" / "fmriprep"))
+                    fset("out", str(new_bids / "derivatives" / "fmriprep"))
 
     # --- Phase 4: Build config, preview, generate ---
-    final_bids = Path(fval('bids')).expanduser().resolve()
-    final_out = Path(fval('out')).expanduser().resolve()
-    final_work = Path(fval('work')).expanduser().resolve()
-    final_fs = Path(fval('fs_license')).expanduser().resolve() if fval('fs_license') else Path('')
-    final_tf = Path(fval('templateflow_home')).expanduser() if fval('templateflow_home') else None
+    final_bids = Path(fval("bids")).expanduser().resolve()
+    final_out = Path(fval("out")).expanduser().resolve()
+    final_work = Path(fval("work")).expanduser().resolve()
+    final_fs = (
+        Path(fval("fs_license")).expanduser().resolve()
+        if fval("fs_license")
+        else Path("")
+    )
+    final_tf = (
+        Path(fval("templateflow_home")).expanduser()
+        if fval("templateflow_home")
+        else None
+    )
 
     if not subjects:
         print("Error: no subjects selected.", file=sys.stderr)
         sys.exit(1)
 
     cfg = BuildConfig(
-        bids=final_bids, out=final_out, work=final_work,
+        bids=final_bids,
+        out=final_out,
+        work=final_work,
         subjects=subjects,
-        container_runtime=fval('runtime'),
-        container=fval('container'),
+        container_runtime=fval("runtime"),
+        container=fval("container"),
         fs_license=final_fs,
         templateflow_home=final_tf,
-        omp_threads=int(fval('omp_threads')),
-        nprocs=int(fval('nprocs')),
-        mem_mb=int(fval('mem_mb')),
-        extra=fval('extra'),
-        skip_bids_validation=fval('skip_bids') == 'true',
-        output_spaces=fval('output_spaces') or None,
+        omp_threads=int(fval("omp_threads")),
+        nprocs=int(fval("nprocs")),
+        mem_mb=int(fval("mem_mb")),
+        extra=fval("extra"),
+        skip_bids_validation=fval("skip_bids") == "true",
+        output_spaces=fval("output_spaces") or None,
         use_aroma=False,
-        cifti_output=fval('cifti_output') == 'true',
-        fs_reconall=fval('fs_reconall') == 'true',
-        use_syn_sdc=fval('use_syn_sdc') == 'true',
+        cifti_output=fval("cifti_output") == "true",
+        fs_reconall=fval("fs_reconall") == "true",
+        use_syn_sdc=fval("use_syn_sdc") == "true",
     )
 
     errors = preflight_check(cfg)
@@ -992,7 +1247,7 @@ def cmd_wizard_review(args, config):
         print("\nPreflight issues:")
         for e in errors:
             print(f"  - {e}")
-        if input("Continue anyway? (y/N): ").strip().lower() != 'y':
+        if input("Continue anyway? (y/N): ").strip().lower() != "y":
             sys.exit(1)
 
     if final_tf and final_tf.exists():
@@ -1005,9 +1260,9 @@ def cmd_wizard_review(args, config):
 
     # SLURM generation
     gen = input("\nGenerate SLURM array script? (Y/n): ").strip().lower()
-    if gen in ('', 'y', 'yes'):
-        if config.get('slurm_script_outdir'):
-            outdir = Path(config['slurm_script_outdir']).expanduser()
+    if gen in ("", "y", "yes"):
+        if config.get("slurm_script_outdir"):
+            outdir = Path(config["slurm_script_outdir"]).expanduser()
         else:
             outdir = default_script_outdir(final_bids)
         outdir.mkdir(parents=True, exist_ok=True)
@@ -1018,38 +1273,53 @@ def cmd_wizard_review(args, config):
         subj_file = outdir / "subjects.txt"
         write_subject_batches(subj_file, subjects)
 
-        slurm_log = Path(fval('log_dir')).expanduser() if fval('log_dir') else outdir / "logs"
+        slurm_log = (
+            Path(fval("log_dir")).expanduser() if fval("log_dir") else outdir / "logs"
+        )
         slurm_log.mkdir(parents=True, exist_ok=True)
 
         status_dir = outdir / "status"
         status_dir.mkdir(parents=True, exist_ok=True)
 
-        cpus_per_task = int(fval('nprocs'))
-        omit_mem = fval('no_mem') == 'true'
-        mem = None if omit_mem else mb_to_human(int(fval('mem_mb')))
-        module_sing = fval('runtime') == 'singularity'
+        cpus_per_task = int(fval("nprocs"))
+        omit_mem = fval("no_mem") == "true"
+        mem = None if omit_mem else mb_to_human(int(fval("mem_mb")))
+        module_sing = fval("runtime") == "singularity"
 
         script_text = create_slurm_script(
-            cfg=cfg, subject_file=subj_file,
-            partition=fval('partition'), time=fval('time_limit'),
-            cpus_per_task=cpus_per_task, mem=mem,
-            account=fval('account') or None, email=fval('email') or None,
-            mail_type=fval('mail_type') or None,
-            log_dir=slurm_log, status_dir=status_dir,
-            module_singularity=module_sing, job_name=fval('job_name'),
+            cfg=cfg,
+            subject_file=subj_file,
+            partition=fval("partition"),
+            time=fval("time_limit"),
+            cpus_per_task=cpus_per_task,
+            mem=mem,
+            account=fval("account") or None,
+            email=fval("email") or None,
+            mail_type=fval("mail_type") or None,
+            log_dir=slurm_log,
+            status_dir=status_dir,
+            module_singularity=module_sing,
+            job_name=fval("job_name"),
         )
         script_path = outdir / "fmriprep_array.sbatch"
         script_path.write_text(script_text)
         os.chmod(script_path, 0o755)
 
         manifest = build_job_manifest(
-            cfg, script_outdir=outdir, subject_file=subj_file,
-            status_dir=status_dir, log_dir=slurm_log,
-            partition=fval('partition'), time=fval('time_limit'),
-            cpus_per_task=cpus_per_task, mem=mem,
-            account=fval('account') or None, email=fval('email') or None,
-            mail_type=fval('mail_type') or None,
-            job_name=fval('job_name'), module_singularity=module_sing,
+            cfg,
+            script_outdir=outdir,
+            subject_file=subj_file,
+            status_dir=status_dir,
+            log_dir=slurm_log,
+            partition=fval("partition"),
+            time=fval("time_limit"),
+            cpus_per_task=cpus_per_task,
+            mem=mem,
+            account=fval("account") or None,
+            email=fval("email") or None,
+            mail_type=fval("mail_type") or None,
+            job_name=fval("job_name"),
+            module_singularity=module_sing,
             subjects_per_job=1,
         )
         manifest_path = outdir / "job_manifest.json"
@@ -1083,7 +1353,9 @@ def cmd_wizard_quick(args, config):
             if choices:
                 for i, c in enumerate(choices, 1):
                     print(f"  {i}. {c}")
-                val = input(f"Enter choice (1-{len(choices)}) [{default or ''}]: ").strip()
+                val = input(
+                    f"Enter choice (1-{len(choices)}) [{default or ''}]: "
+                ).strip()
                 if val.isdigit() and 1 <= int(val) <= len(choices):
                     return choices[int(val) - 1]
                 return default or choices[0]
@@ -1097,11 +1369,13 @@ def cmd_wizard_quick(args, config):
     print("=" * 60 + "\n")
 
     # 1. BIDS path
-    default_bids = config.get('bids', str(Path.cwd()))
+    default_bids = config.get("bids", str(Path.cwd()))
     bids = Path(ask("BIDS dataset path", default=default_bids, path=True)).expanduser()
     while not bids.exists():
         print("Path does not exist.")
-        bids = Path(ask("BIDS dataset path", default=str(Path.cwd()), path=True)).expanduser()
+        bids = Path(
+            ask("BIDS dataset path", default=str(Path.cwd()), path=True)
+        ).expanduser()
 
     # 2. Subjects
     subs = discover_subjects(bids)
@@ -1109,15 +1383,19 @@ def cmd_wizard_quick(args, config):
         print("No subjects found in BIDS directory. Exiting.")
         return
     print(f"Found {len(subs)} subjects.")
-    selection = ask("Which subjects?", choices=["all"] + (["select"] if len(subs) > 1 else []))
+    selection = ask(
+        "Which subjects?", choices=["all"] + (["select"] if len(subs) > 1 else [])
+    )
     if selection == "select":
         for i, s in enumerate(subs, 1):
             print(f"  {i}. {s}")
-        sel_input = input("Enter numbers separated by spaces (e.g., '1 3 5'), or range '1-10': ").strip()
-        if '-' in sel_input and not sel_input.startswith('sub-'):
+        sel_input = input(
+            "Enter numbers separated by spaces (e.g., '1 3 5'), or range '1-10': "
+        ).strip()
+        if "-" in sel_input and not sel_input.startswith("sub-"):
             try:
-                start, end = sel_input.split('-')
-                selected_subjects = subs[int(start)-1:int(end)]
+                start, end = sel_input.split("-")
+                selected_subjects = subs[int(start) - 1 : int(end)]
             except (ValueError, IndexError):
                 print("Invalid range, using all.")
                 selected_subjects = subs
@@ -1125,7 +1403,7 @@ def cmd_wizard_quick(args, config):
             selected_subjects = []
             for n in sel_input.split():
                 try:
-                    selected_subjects.append(subs[int(n)-1])
+                    selected_subjects.append(subs[int(n) - 1])
                 except (ValueError, IndexError):
                     pass
             if not selected_subjects:
@@ -1136,74 +1414,103 @@ def cmd_wizard_quick(args, config):
     print(f"Selected {len(selected_subjects)} subjects.")
 
     # 3. Resolve runtime + container (from config, ask only if missing)
-    runtime = config.get('runtime', 'auto')
-    if runtime == 'auto':
+    runtime = config.get("runtime", "auto")
+    if runtime == "auto":
         try:
             runtime = detect_runtime("auto")
             print(f"Auto-detected runtime: {runtime}")
         except (FileNotFoundError, RuntimeError, OSError) as e:
             print(f"Runtime auto-detection failed: {e}", file=sys.stderr)
-            runtime = ask("Runtime?", choices=["singularity", "fmriprep-docker", "docker"])
+            runtime = ask(
+                "Runtime?", choices=["singularity", "fmriprep-docker", "docker"]
+            )
 
-    container = config.get('container', 'auto')
-    if container == 'auto' or not container:
+    container = config.get("container", "auto")
+    if container == "auto" or not container:
         if runtime == "singularity":
             sif_dir = os.environ.get("FMRIPREP_SIF_DIR")
             images = discover_sif_images(sif_dir)
             if images:
-                container = str(images[0]) if len(images) == 1 else ask("Choose container", choices=[str(p) for p in images])
+                container = (
+                    str(images[0])
+                    if len(images) == 1
+                    else ask("Choose container", choices=[str(p) for p in images])
+                )
             else:
                 container = ask("Path to fMRIPrep .sif/.simg", path=True)
         else:
             imgs = docker_list_fmriprep_images()
-            container = imgs[0] if imgs else ask("Docker image:tag", default="nipreps/fmriprep:latest")
+            container = (
+                imgs[0]
+                if imgs
+                else ask("Docker image:tag", default="nipreps/fmriprep:latest")
+            )
     else:
         container_path = Path(container).expanduser()
         if container_path.is_dir():
             dir_images = discover_sif_images(str(container_path))
             if dir_images:
-                container = str(dir_images[0]) if len(dir_images) == 1 else ask("Choose container", choices=[str(p) for p in dir_images])
+                container = (
+                    str(dir_images[0])
+                    if len(dir_images) == 1
+                    else ask("Choose container", choices=[str(p) for p in dir_images])
+                )
         print(f"Using container: {container}")
 
     # 4. FS license (from config/env, ask only if missing)
-    fs_license_str = config.get('fs_license', os.environ.get("FS_LICENSE", ""))
+    fs_license_str = config.get("fs_license", os.environ.get("FS_LICENSE", ""))
     if not fs_license_str or not Path(fs_license_str).expanduser().exists():
-        fs_license_str = ask("Path to FreeSurfer license.txt", default=fs_license_str or str(Path.home() / "license.txt"), path=True)
+        fs_license_str = ask(
+            "Path to FreeSurfer license.txt",
+            default=fs_license_str or str(Path.home() / "license.txt"),
+            path=True,
+        )
     fs_license = Path(fs_license_str).expanduser()
     print(f"Using FS license: {fs_license}")
 
     # 5. TemplateFlow (from config/env, validate)
-    tf_str = config.get('templateflow_home',
-                        os.environ.get("TEMPLATEFLOW_HOME",
-                                      str(Path.home() / ".cache" / "templateflow")))
+    tf_str = config.get(
+        "templateflow_home",
+        os.environ.get(
+            "TEMPLATEFLOW_HOME", str(Path.home() / ".cache" / "templateflow")
+        ),
+    )
     templateflow_home = Path(tf_str).expanduser()
     templateflow_home.mkdir(parents=True, exist_ok=True)
     _validate_templateflow(templateflow_home)
 
     # 6. Derive all other settings from config
     cpus_auto, mem_auto = default_resources_from_env()
-    nprocs = int(config.get('nprocs', str(cpus_auto)))
-    omp_threads = int(config.get('omp_threads', str(min(8, nprocs))))
-    mem_mb = int(config.get('mem_mb', str(mem_auto)))
-    output_spaces = config.get('output_spaces', "MNI152NLin2009cAsym:res-2 T1w")
-    skip_bids_validation = config.get('skip_bids_validation', 'true').lower() == 'true'
-    use_aroma = config.get('use_aroma', 'false').lower() == 'true'
-    cifti_output = config.get('cifti_output', 'false').lower() == 'true'
-    fs_reconall = config.get('fs_reconall', 'true').lower() == 'true'
-    use_syn_sdc = config.get('use_syn_sdc', 'false').lower() == 'true'
-    extra = config.get('extra', '')
+    nprocs = int(config.get("nprocs", str(cpus_auto)))
+    omp_threads = int(config.get("omp_threads", str(min(8, nprocs))))
+    mem_mb = int(config.get("mem_mb", str(mem_auto)))
+    output_spaces = config.get("output_spaces", "MNI152NLin2009cAsym:res-2 T1w")
+    skip_bids_validation = config.get("skip_bids_validation", "true").lower() == "true"
+    use_aroma = config.get("use_aroma", "false").lower() == "true"
+    cifti_output = config.get("cifti_output", "false").lower() == "true"
+    fs_reconall = config.get("fs_reconall", "true").lower() == "true"
+    use_syn_sdc = config.get("use_syn_sdc", "false").lower() == "true"
+    extra = config.get("extra", "")
 
     cfg = BuildConfig(
-        bids=bids, out=Path(config.get('out', str(bids / "derivatives" / "fmriprep"))),
-        work=Path(config.get('work', str(bids / "work_fmriprep"))),
+        bids=bids,
+        out=Path(config.get("out", str(bids / "derivatives" / "fmriprep"))),
+        work=Path(config.get("work", str(bids / "work_fmriprep"))),
         subjects=selected_subjects,
-        container_runtime=runtime, container=container,
-        fs_license=fs_license, templateflow_home=templateflow_home,
-        omp_threads=omp_threads, nprocs=nprocs, mem_mb=mem_mb,
-        extra=extra, skip_bids_validation=skip_bids_validation,
+        container_runtime=runtime,
+        container=container,
+        fs_license=fs_license,
+        templateflow_home=templateflow_home,
+        omp_threads=omp_threads,
+        nprocs=nprocs,
+        mem_mb=mem_mb,
+        extra=extra,
+        skip_bids_validation=skip_bids_validation,
         output_spaces=output_spaces or None,
-        use_aroma=use_aroma, cifti_output=cifti_output,
-        fs_reconall=fs_reconall, use_syn_sdc=use_syn_sdc
+        use_aroma=use_aroma,
+        cifti_output=cifti_output,
+        fs_reconall=fs_reconall,
+        use_syn_sdc=use_syn_sdc,
     )
 
     # Create output dirs
@@ -1217,8 +1524,8 @@ def cmd_wizard_quick(args, config):
     # Generate SLURM script
     gen = ask("Generate SLURM array script?", choices=["y", "n"])
     if gen == "y":
-        if config.get('slurm_script_outdir'):
-            outdir = Path(config['slurm_script_outdir']).expanduser()
+        if config.get("slurm_script_outdir"):
+            outdir = Path(config["slurm_script_outdir"]).expanduser()
         else:
             outdir = default_script_outdir(bids)
         outdir.mkdir(parents=True, exist_ok=True)
@@ -1227,26 +1534,39 @@ def cmd_wizard_quick(args, config):
         subj_file = outdir / "subjects.txt"
         write_subject_batches(subj_file, selected_subjects)
 
-        partition = config.get('slurm_partition', os.environ.get("SLURM_JOB_PARTITION", "compute"))
-        time = config.get('slurm_time', "24:00:00")
-        cpus_per_task = int(config.get('slurm_cpus_per_task', str(nprocs)))
-        account = config.get('slurm_account') or None
-        email = config.get('slurm_email') or None
-        mail_type = config.get('slurm_mail_type') or None
-        job_name = config.get('slurm_job_name', "fmriprep")
-        no_mem = config.get('slurm_no_mem', config.get('no_mem', 'false')).lower() == 'true'
-        log_dir = Path(config.get('slurm_log_dir', str(outdir / "logs"))).expanduser()
-        mem = None if no_mem else config.get('slurm_mem', mb_to_human(mem_mb))
+        partition = config.get(
+            "slurm_partition", os.environ.get("SLURM_JOB_PARTITION", "compute")
+        )
+        time = config.get("slurm_time", "24:00:00")
+        cpus_per_task = int(config.get("slurm_cpus_per_task", str(nprocs)))
+        account = config.get("slurm_account") or None
+        email = config.get("slurm_email") or None
+        mail_type = config.get("slurm_mail_type") or None
+        job_name = config.get("slurm_job_name", "fmriprep")
+        no_mem = (
+            config.get("slurm_no_mem", config.get("no_mem", "false")).lower() == "true"
+        )
+        log_dir = Path(config.get("slurm_log_dir", str(outdir / "logs"))).expanduser()
+        mem = None if no_mem else config.get("slurm_mem", mb_to_human(mem_mb))
         module_sing = runtime == "singularity"
 
         status_dir = outdir / "status"
         status_dir.mkdir(parents=True, exist_ok=True)
 
         script_text = create_slurm_script(
-            cfg=cfg, subject_file=subj_file, partition=partition, time=time,
-            cpus_per_task=cpus_per_task, mem=mem, account=account, email=email,
-            mail_type=mail_type, log_dir=log_dir, status_dir=status_dir,
-            module_singularity=module_sing, job_name=job_name
+            cfg=cfg,
+            subject_file=subj_file,
+            partition=partition,
+            time=time,
+            cpus_per_task=cpus_per_task,
+            mem=mem,
+            account=account,
+            email=email,
+            mail_type=mail_type,
+            log_dir=log_dir,
+            status_dir=status_dir,
+            module_singularity=module_sing,
+            job_name=job_name,
         )
         script_path = outdir / "fmriprep_array.sbatch"
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -1259,13 +1579,16 @@ def cmd_wizard_quick(args, config):
 
 
 def cmd_wizard(args):
-    config = load_config([args.config] if hasattr(args, 'config') and args.config else [])
-    if getattr(args, 'quick', False):
+    config = load_config(
+        [args.config] if hasattr(args, "config") and args.config else []
+    )
+    if getattr(args, "quick", False):
         return cmd_wizard_quick(args, config)
     return cmd_wizard_review(args, config)
 
 
 # -------------------- UI launcher commands --------------------
+
 
 def _find_sibling_script(name: str) -> Path:
     """Locate a script in the same directory as this launcher."""
@@ -1281,9 +1604,12 @@ def cmd_tui(_args):
     try:
         import textual  # noqa: F401
     except ImportError:
-        print("The Textual TUI requires the 'textual' package.\n"
-              "Install it with:\n  pip install textual\n"
-              "Then re-run:  fmriprep_launcher.py tui", file=sys.stderr)
+        print(
+            "The Textual TUI requires the 'textual' package.\n"
+            "Install it with:\n  pip install textual\n"
+            "Then re-run:  fmriprep_launcher.py tui",
+            file=sys.stderr,
+        )
         sys.exit(1)
     script = _find_sibling_script("fmriprep_tui_autocomplete.py")
     os.execv(sys.executable, [sys.executable, str(script)])
@@ -1294,15 +1620,21 @@ def cmd_gui(_args):
     try:
         import tkinter  # noqa: F401
     except ImportError:
-        print("Tkinter is not available in this Python installation.\n"
-              "On HPC clusters, try loading a different Python module:\n"
-              "  module load python/3.11  (or similar)\n"
-              "Or use the TUI instead:  fmriprep_launcher.py tui", file=sys.stderr)
+        print(
+            "Tkinter is not available in this Python installation.\n"
+            "On HPC clusters, try loading a different Python module:\n"
+            "  module load python/3.11  (or similar)\n"
+            "Or use the TUI instead:  fmriprep_launcher.py tui",
+            file=sys.stderr,
+        )
         sys.exit(1)
     if not os.environ.get("DISPLAY"):
-        print("No DISPLAY set. The Tk GUI needs X11 forwarding.\n"
-              "Connect with:  ssh -X user@cluster\n"
-              "Or use the TUI instead:  fmriprep_launcher.py tui", file=sys.stderr)
+        print(
+            "No DISPLAY set. The Tk GUI needs X11 forwarding.\n"
+            "Connect with:  ssh -X user@cluster\n"
+            "Or use the TUI instead:  fmriprep_launcher.py tui",
+            file=sys.stderr,
+        )
         sys.exit(1)
     script = _find_sibling_script("fmriprep_gui_tk.py")
     os.execv(sys.executable, [sys.executable, str(script)])
@@ -1310,9 +1642,10 @@ def cmd_gui(_args):
 
 # ---------------------------- Main ----------------------------
 
+
 def main():
     ap = argparse.ArgumentParser(
-        prog="fmriprep_launcher", 
+        prog="fmriprep_launcher",
         description="One-stop fMRIPrep command & Slurm script generator",
         epilog="""Run '<subcommand> --help' for subcommand-specific options.
 
@@ -1342,9 +1675,11 @@ Config files are read in priority order (later overrides earlier):
 
 Environment variables: FMRIPREP_SIF_DIR, FS_LICENSE, TEMPLATEFLOW_HOME
         """,
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    ap.add_argument("--config", type=str, help="Path to additional config file (overrides defaults)")
+    ap.add_argument(
+        "--config", type=str, help="Path to additional config file (overrides defaults)"
+    )
 
     # Pre-scan sys.argv for --config so we can load defaults before building
     # subparsers. This avoids parse_known_args() which swallows --help.
@@ -1359,28 +1694,41 @@ Environment variables: FMRIPREP_SIF_DIR, FS_LICENSE, TEMPLATEFLOW_HOME
 
     # Load configuration defaults
     config = load_config([config_path] if config_path else [])
-    
+
     # Now add subparsers
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     # init
-    p_init = sub.add_parser("init", help="Generate a starter fmriprep config file",
-                            epilog="Examples:\n"
-                                   "  %(prog)s --user          # Create ~/.config/fmriprep/config.ini\n"
-                                   "  %(prog)s                 # Create ./fmriprep.ini for this dataset\n"
-                                   "  %(prog)s /path/to/bids   # Create fmriprep.ini in a BIDS directory\n",
-                            formatter_class=argparse.RawDescriptionHelpFormatter)
-    p_init.add_argument("dir", nargs="?", default=".",
-                        help="Target directory for project config (default: current directory)")
-    p_init.add_argument("--user", action="store_true",
-                        help="Create a user-level config at ~/.config/fmriprep/config.ini "
-                             "(infrastructure defaults shared across all projects)")
-    p_init.add_argument("--force", action="store_true",
-                        help="Overwrite existing config file")
+    p_init = sub.add_parser(
+        "init",
+        help="Generate a starter fmriprep config file",
+        epilog="Examples:\n"
+        "  %(prog)s --user          # Create ~/.config/fmriprep/config.ini\n"
+        "  %(prog)s                 # Create ./fmriprep.ini for this dataset\n"
+        "  %(prog)s /path/to/bids   # Create fmriprep.ini in a BIDS directory\n",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_init.add_argument(
+        "dir",
+        nargs="?",
+        default=".",
+        help="Target directory for project config (default: current directory)",
+    )
+    p_init.add_argument(
+        "--user",
+        action="store_true",
+        help="Create a user-level config at ~/.config/fmriprep/config.ini "
+        "(infrastructure defaults shared across all projects)",
+    )
+    p_init.add_argument(
+        "--force", action="store_true", help="Overwrite existing config file"
+    )
     p_init.set_defaults(func=cmd_init)
 
     # probe
-    p_probe = sub.add_parser("probe", help="Show detected runtimes and available containers")
+    p_probe = sub.add_parser(
+        "probe", help="Show detected runtimes and available containers"
+    )
     p_probe.set_defaults(func=cmd_probe)
 
     # print-cmd
@@ -1389,18 +1737,39 @@ Environment variables: FMRIPREP_SIF_DIR, FS_LICENSE, TEMPLATEFLOW_HOME
     p_print.set_defaults(func=cmd_print)
 
     # slurm-array
-    p_slurm = sub.add_parser("slurm-array", help="Generate a Slurm array script and subject list")
+    p_slurm = sub.add_parser(
+        "slurm-array", help="Generate a Slurm array script and subject list"
+    )
     add_common_args(p_slurm, config)
-    p_slurm.add_argument("--script-outdir", type=Path,
-                        default=Path(config["slurm_script_outdir"]) if config.get("slurm_script_outdir") else None,
-                        help="Where to write sbatch + bundle (default: $SCRATCH/<bids>_fmriprep_job if $SCRATCH is set, else ./fmriprep_job). "
-                             "Must be writable from compute nodes — status/ markers are written there at runtime.")
-    p_slurm.add_argument("--partition", default=config.get("slurm_partition", "compute"))
-    p_slurm.add_argument("--time", default=config.get("slurm_time", "24:00:00"), help="Walltime, e.g. 24:00:00")
-    p_slurm.add_argument("--cpus-per-task", type=int, 
-                        default=int(config["slurm_cpus_per_task"]) if config.get("slurm_cpus_per_task", "").strip() else None)
-    p_slurm.add_argument("--mem", default=config.get("slurm_mem"), 
-                        help="Slurm memory request (e.g. 32G). Default: based on mem-mb. Use 'none' to omit --mem")
+    p_slurm.add_argument(
+        "--script-outdir",
+        type=Path,
+        default=Path(config["slurm_script_outdir"])
+        if config.get("slurm_script_outdir")
+        else None,
+        help="Where to write sbatch + bundle (default: $SCRATCH/<bids>_fmriprep_job if $SCRATCH is set, else ./fmriprep_job). "
+        "Must be writable from compute nodes — status/ markers are written there at runtime.",
+    )
+    p_slurm.add_argument(
+        "--partition", default=config.get("slurm_partition", "compute")
+    )
+    p_slurm.add_argument(
+        "--time",
+        default=config.get("slurm_time", "24:00:00"),
+        help="Walltime, e.g. 24:00:00",
+    )
+    p_slurm.add_argument(
+        "--cpus-per-task",
+        type=int,
+        default=int(config["slurm_cpus_per_task"])
+        if config.get("slurm_cpus_per_task", "").strip()
+        else None,
+    )
+    p_slurm.add_argument(
+        "--mem",
+        default=config.get("slurm_mem"),
+        help="Slurm memory request (e.g. 32G). Default: based on mem-mb. Use 'none' to omit --mem",
+    )
     p_slurm.add_argument("--account", default=config.get("slurm_account"))
     p_slurm.add_argument("--email", default=config.get("slurm_email"))
     p_slurm.add_argument("--mail-type", default=config.get("slurm_mail_type"))
@@ -1411,34 +1780,75 @@ Environment variables: FMRIPREP_SIF_DIR, FS_LICENSE, TEMPLATEFLOW_HOME
         default=config.get("slurm_module_singularity", "false").lower() == "true",
         help="Insert 'module load singularity' in script",
     )
-    p_slurm.add_argument("--log-dir", type=Path,
-                        default=Path(config["slurm_log_dir"]) if "slurm_log_dir" in config else None,
-                        help="Override log directory (default: script-outdir/logs)")
-    p_slurm.add_argument("--no-mem", action="store_true",
-                        default=config.get("slurm_no_mem", config.get("no_mem", "false")).lower() == "true",
-                        help="Omit --mem specification (for whole-node clusters)")
-    p_slurm.add_argument("--subjects-per-job", type=int, default=1, 
-                        help="Number of subjects to process per job (default: 1). "
-                             "Values >1 batch multiple subjects together, reducing total jobs but requiring more resources per job.")
+    p_slurm.add_argument(
+        "--log-dir",
+        type=Path,
+        default=Path(config["slurm_log_dir"]) if "slurm_log_dir" in config else None,
+        help="Override log directory (default: script-outdir/logs)",
+    )
+    p_slurm.add_argument(
+        "--no-mem",
+        action="store_true",
+        default=config.get("slurm_no_mem", config.get("no_mem", "false")).lower()
+        == "true",
+        help="Omit --mem specification (for whole-node clusters)",
+    )
+    p_slurm.add_argument(
+        "--subjects-per-job",
+        type=int,
+        default=1,
+        help="Number of subjects to process per job (default: 1). "
+        "Values >1 batch multiple subjects together, reducing total jobs but requiring more resources per job.",
+    )
     p_slurm.set_defaults(func=cmd_slurm_array)
 
     # rerun-failed
-    p_rerun = sub.add_parser("rerun-failed", help="Generate a new Slurm bundle for subjects marked failed in a previous job")
-    p_rerun.add_argument("--manifest", type=Path, required=True, help="Path to a prior job_manifest.json")
-    p_rerun.add_argument("--status-dir", type=Path, default=None, help="Override the status directory instead of using the one from the manifest")
-    p_rerun.add_argument("--script-outdir", type=Path, default=None, help="Where to write the rerun bundle (default: <manifest dir>/rerun_failed_job)")
-    p_rerun.add_argument("--subjects-per-job", type=int, default=None, help="Override batching for the rerun bundle")
-    p_rerun.add_argument("--job-name", default=None, help="Override the rerun Slurm job name")
+    p_rerun = sub.add_parser(
+        "rerun-failed",
+        help="Generate a new Slurm bundle for subjects marked failed in a previous job",
+    )
+    p_rerun.add_argument(
+        "--manifest", type=Path, required=True, help="Path to a prior job_manifest.json"
+    )
+    p_rerun.add_argument(
+        "--status-dir",
+        type=Path,
+        default=None,
+        help="Override the status directory instead of using the one from the manifest",
+    )
+    p_rerun.add_argument(
+        "--script-outdir",
+        type=Path,
+        default=None,
+        help="Where to write the rerun bundle (default: <manifest dir>/rerun_failed_job)",
+    )
+    p_rerun.add_argument(
+        "--subjects-per-job",
+        type=int,
+        default=None,
+        help="Override batching for the rerun bundle",
+    )
+    p_rerun.add_argument(
+        "--job-name", default=None, help="Override the rerun Slurm job name"
+    )
     p_rerun.set_defaults(func=cmd_rerun_failed)
 
     # wizard
-    p_wiz = sub.add_parser("wizard", help="Interactive setup (review-and-edit table by default)")
-    p_wiz.add_argument("--quick", action="store_true",
-                       help="Express mode: only ask essential questions, derive everything else from config/env/defaults")
+    p_wiz = sub.add_parser(
+        "wizard", help="Interactive setup (review-and-edit table by default)"
+    )
+    p_wiz.add_argument(
+        "--quick",
+        action="store_true",
+        help="Express mode: only ask essential questions, derive everything else from config/env/defaults",
+    )
     p_wiz.set_defaults(func=cmd_wizard)
 
     # tui
-    p_tui = sub.add_parser("tui", help="Textual terminal UI with tabs and path completion (requires: pip install textual)")
+    p_tui = sub.add_parser(
+        "tui",
+        help="Textual terminal UI with tabs and path completion (requires: pip install textual)",
+    )
     p_tui.set_defaults(func=cmd_tui)
 
     # gui
@@ -1447,6 +1857,7 @@ Environment variables: FMRIPREP_SIF_DIR, FS_LICENSE, TEMPLATEFLOW_HOME
 
     args = ap.parse_args()
     args.func(args)
+
 
 if __name__ == "__main__":
     main()

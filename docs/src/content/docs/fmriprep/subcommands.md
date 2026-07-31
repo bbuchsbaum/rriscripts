@@ -103,16 +103,102 @@ Because it is a plain text file, you can edit it before submitting: delete lines
 to skip subjects, or reorder them. Just keep the `--array` range in the sbatch
 consistent with the number of lines.
 
-### Batching subjects per task
+### Spreading subjects across nodes
 
-```bash
-fmriprep_launcher.py slurm-array ... --subjects-per-job 4
+You do not choose the number of nodes directly. You choose **how many subjects
+share a task** with `--subjects-per-job`, and the number of array tasks follows:
+
+```text
+number of array tasks = ceil(subjects / subjects-per-job)
 ```
 
-Each array task then runs 4 subjects in parallel via `xargs`. The launcher
-requests 4× the per-subject CPU and memory for that array task and writes one
-line per subject batch to `subjects.txt`. See
-[Subject batching](../cluster-notes/#subject-batching).
+Each array task is one node's allocation, so "how many nodes" is really "how
+many array tasks". To spread `S` subjects across `N` nodes, set
+`--subjects-per-job` to `S / N`.
+
+The examples below assume a per-subject cost of `nprocs = 4` and
+`mem_mb = 8000`, either from your config or auto-detected. The launcher
+multiplies both by the batch size, since the subjects in a task run
+concurrently.
+
+#### 20 subjects across 4 nodes
+
+```bash
+fmriprep_launcher.py slurm-array --subjects all --subjects-per-job 5
+```
+
+```text
+#SBATCH --array=0-3
+#SBATCH --cpus-per-task=20      # 4 x 5
+#SBATCH --mem=40G               # 8000 MB x 5
+```
+
+`subjects.txt`:
+
+```text
+sub-01 sub-02 sub-03 sub-04 sub-05
+sub-06 sub-07 sub-08 sub-09 sub-10
+sub-11 sub-12 sub-13 sub-14 sub-15
+sub-16 sub-17 sub-18 sub-19 sub-20
+```
+
+#### 10 subjects on 1 node
+
+```bash
+fmriprep_launcher.py slurm-array --subjects all --subjects-per-job 10
+```
+
+```text
+#SBATCH --array=0-0
+#SBATCH --cpus-per-task=40      # 4 x 10
+#SBATCH --mem=80G               # 8000 MB x 10
+```
+
+A single task, all ten subjects running in parallel inside it. Note what that
+asks for: 40 cores and 80 GB on one node. Check it against your partition's
+node size before submitting — this is the shape most likely to sit in the queue
+or be rejected outright.
+
+#### 100 subjects across 10 nodes
+
+```bash
+fmriprep_launcher.py slurm-array --subjects all --subjects-per-job 10
+```
+
+```text
+#SBATCH --array=0-9
+#SBATCH --cpus-per-task=40
+#SBATCH --mem=80G
+```
+
+Ten tasks of ten subjects each. Per-task resources are identical to the previous
+example — only the array range grows, because `--subjects-per-job` sets the task
+size and the subject count sets the task count.
+
+To use smaller nodes instead, shrink the batch: `--subjects-per-job 5` gives 20
+tasks at 20 cores and 40 GB each. Same total work, spread thinner.
+
+#### Choosing a batch size
+
+| Consideration | Pushes toward |
+|---|---|
+| Node core/memory limits | Smaller batches |
+| Per-job scheduler overhead, queue limits on array size | Larger batches |
+| Wanting failures isolated to few subjects | Smaller batches |
+| Short per-subject runtimes | Larger batches |
+
+A batched task is only as fast as its slowest subject, and it holds the whole
+allocation until the last one finishes. Batches of 2–4 are a reasonable starting
+point; go higher only when you have checked the resulting request fits a real
+node.
+
+:::caution
+Throttle concurrent tasks with the SLURM array syntax if your site limits how
+many you may run at once — edit `#SBATCH --array=0-9` to `0-9%3` in the
+generated script to cap it at three at a time.
+:::
+
+See also [Subject batching](../cluster-notes/#subject-batching).
 
 ## `print-cmd` — print commands without submitting
 
