@@ -26,9 +26,13 @@ jobs:
       # use-public-rspm above means these resolve to Linux binaries rather than
       # building from source.
       - name: Install R packages
+        env:
+          # remotes falls back to a PAT bundled in the package, which is shared
+          # by every user and routinely rate-limited. Use the job's own token.
+          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
         run: |
           Rscript -e 'install.packages(c("optparse", "remotes"))'
-          Rscript -e 'remotes::install_github("bbuchsbaum/xnatR", upgrade = "never")'
+          Rscript -e 'remotes::install_github("bbuchsbaum/xnatR@main", upgrade = "never")'
 
       - name: Install bats
         run: |
