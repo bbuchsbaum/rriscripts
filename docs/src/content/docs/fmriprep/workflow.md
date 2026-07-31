@@ -151,17 +151,35 @@ One array task per subject (or per batch of subjects, with
 
 ## Step 5 — retry only what failed
 
-On a dataset of any size, some subjects will fail. Rather than resubmitting
-everything:
+On a dataset of any size, some subjects will fail — a bad scan, a timeout, an
+out-of-memory kill. Rather than resubmitting everything:
 
 ```bash
 fmriprep_launcher.py rerun-failed --manifest "$JOB_DIR/job_manifest.json"
 sbatch "$JOB_DIR/rerun_failed_job/fmriprep_array.sbatch"
 ```
 
-This reads the manifest and the per-subject status markers from the finished run
-and writes a **new** bundle containing only the subjects that failed. See
-[Recovering from failures](#recovering-from-failures).
+This is why step 4 produced two files you have not used yet. `rerun-failed`
+reads both:
+
+- **`job_manifest.json`** — the snapshot of every config value the original run
+  used, so the retry is built the same way rather than from whatever your config
+  says today.
+- **`status/`** — one marker file per subject (`.running`, `.ok`, `.failed`),
+  written by the array tasks as they go, so the launcher can tell which subjects
+  still need work.
+
+From those it writes a **new** bundle, in `rerun_failed_job/` next to the
+manifest, containing only the subjects with `.failed` markers. The original
+bundle is not modified, so you can repeat this as many times as you need —
+each round narrowing to whatever is still failing.
+
+:::note
+This only works if the run wrote a `job_manifest.json`. `slurm-array` always
+does. Of the [interactive paths](#the-interactive-paths) below, the full
+`wizard` does too, but `wizard --quick` does not — which is the main reason to
+prefer `slurm-array` for anything larger than a handful of subjects.
+:::
 
 ## The whole thing, condensed
 
@@ -244,32 +262,26 @@ read-only from compute nodes, a bundle there dies before fMRIPrep starts. See
 [Cluster notes](../cluster-notes/).
 :::
 
-## Recovering from failures
-
-`rerun-failed` is the reason to prefer `slurm-array` over the quick wizard. It
-reads the manifest and the `status/` markers from a finished run and writes a
-new bundle containing only the subjects with `.failed` markers:
-
-```bash
-fmriprep_launcher.py rerun-failed --manifest "$JOB_DIR/job_manifest.json"
-sbatch "$JOB_DIR/rerun_failed_job/fmriprep_array.sbatch"
-```
-
-The original bundle is not mutated, so you can re-run this as many times as you
-need. Without a `job_manifest.json` there is nothing to reconstruct the run
-from — which is why `wizard --quick`, which does not write one, is a dead end
-for large datasets.
-
 ## The interactive paths
 
-Use these only when they help:
+Everything above is non-interactive: you edit config files, and the launcher
+reads them. There are also frontends that ask you questions instead, wrapping
+the same backend. They replace steps 2–4, not the whole workflow — you still
+submit the generated sbatch yourself.
 
-- `fmriprep_launcher.py wizard` reviews every value and writes an sbatch,
-  `subjects.txt`, and `job_manifest.json`.
-- `fmriprep_launcher.py wizard --quick` asks only for missing essentials, but
-  currently writes only the sbatch and `subjects.txt`. Use `slurm-array` or the
-  full `wizard` if you need manifest-backed reruns.
-- `run_fmriprep_wizard.sh` activates a likely virtualenv and runs
-  `fmriprep_launcher.py wizard`.
-- `fmriprep_launcher.py tui` and `fmriprep_launcher.py gui` are optional UI
-  frontends over the same backend.
+Use them only when they help:
+
+| Command | What it is |
+|---|---|
+| `fmriprep_launcher.py wizard` | Prompts through every value as a numbered table you can edit by field number. Writes the sbatch, `subjects.txt`, and `job_manifest.json`. |
+| `fmriprep_launcher.py wizard --quick` | Asks only for values it cannot infer. Writes the sbatch and `subjects.txt` — **but not `job_manifest.json`**. |
+| `run_fmriprep_wizard.sh` | Activates a likely virtualenv, then runs `wizard`. |
+| `fmriprep_launcher.py tui` | Textual terminal UI (`pip install textual`). |
+| `fmriprep_launcher.py gui` | Tk GUI (needs Tk and an X11 display). |
+
+:::caution
+Because `wizard --quick` writes no `job_manifest.json`, a run started that way
+cannot use [`rerun-failed`](#step-5--retry-only-what-failed) afterwards. It is
+fine for a quick test on a few subjects; for a real dataset use `slurm-array` or
+the full `wizard`.
+:::
