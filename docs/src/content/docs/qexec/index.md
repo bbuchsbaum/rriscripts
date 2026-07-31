@@ -12,35 +12,57 @@ Nothing here replaces SLURM — `qexec.sh` computes an `sbatch`/`salloc`
 invocation and runs it. `--dry-run` prints exactly what it would submit, which
 makes it easy to check your reasoning before spending an allocation.
 
-## The commands
+## The two that matter
 
-Most work uses one or two of these. Start with `qexec.sh`; reach for the others
-when your commands come from somewhere other than a file you wrote by hand.
+Almost everything is one of these:
 
-**Submitting**
-
-| Command | Use it when |
+| Command | What it does |
 |---|---|
-| `qexec.sh` | You have a command, an interactive session, or a command file. Does all of it. |
-| `bexec.sh` | You have a command file and want the batched-array defaults without spelling them out. |
-| `batch_exec.sh` | Your commands follow a pattern like `--sub [1..100]`. |
-| `send_slurm.sh` | Your commands arrive on stdin, from `cmd_expand.sh` or something else. |
+| `qexec.sh` | Submits work to SLURM — a single command, an interactive session, or a command file as an array. |
+| `cmd_expand.sh` | Turns `[1..100]`-style patterns into concrete command lines, so you can read them before submitting. |
 
-**Generating**
+Learning those two covers the whole toolkit. Everything below is a convenience
+on top of them.
 
-| Command | Use it when |
+## Convenience wrappers
+
+Three scripts wrap `qexec.sh` with defaults tuned for a particular input shape.
+Each one shells out to `qexec.sh` and `command_distributor.sh`, so anything they
+do, `qexec.sh` can do with more typing:
+
+| Command | Saves you from |
 |---|---|
-| `cmd_expand.sh` | You want to turn `[1..100]` into concrete command lines, and look at them before submitting. |
+| `bexec.sh` | Spelling out the batched-array defaults for a command file you already have. |
+| `batch_exec.sh` | Running `cmd_expand.sh` yourself before submitting a generated grid. |
+| `send_slurm.sh` | Writing a command file at all, when commands arrive on stdin. |
 
-**Watching**
+Reach for them when they fit; ignore them otherwise.
 
-| Command | Use it when |
+## Also in the directory
+
+These ship with the toolkit but sit outside the main path:
+
+| Command | Notes |
 |---|---|
-| `rjobtop.py` | A job is running and you want live CPU and memory use. |
-| `slurm_job_monitor.sh` | You want to be told when jobs finish, with efficiency stats. |
+| `rjobtop.py` | Live CPU and memory for a running job. Linux-only — it reads `/proc`, so it does not run on macOS. |
+| `slurm_job_monitor.sh` | Polls jobs to completion and reports `seff` efficiency stats. Also what `qexec.sh --wait` calls. |
+| `qexec_gui.tcl`, `batch_exec_gui.tcl` | Tcl/Tk frontends. Not installed by `install.sh`; run them from a clone. |
+| `qexec.hs`, `cmd_expand.hs`, `bexec.hs`, `command_distributor.hs` | Haskell reimplementations. Not built or installed by `install.sh`. |
 
-Optional Tcl/Tk frontends (`qexec_gui.tcl`, `batch_exec_gui.tcl`) and Haskell
-reimplementations of several tools also ship in the directory; see
+:::note[Coverage is uneven]
+The submission path is well covered by the [bats suite](https://github.com/bats-core/bats-core) —
+`qexec.sh` has 57 tests, `cmd_expand.sh` 23, `command_distributor.sh` 13,
+`batch_exec.sh` 13, `send_slurm.sh` 7, `bexec.sh` 4.
+
+The tools in this last section have **no automated tests**: the monitors need a
+live SLURM job and a Linux `/proc`, and the GUIs need a display. The Haskell
+ports are not built by CI either, so treat them as unmaintained relative to the
+shell versions. Nothing here is broken as far as anyone knows — it is just less
+exercised, so check its output rather than assuming.
+:::
+
+`command_distributor.sh` also ships in the directory but runs *inside* an array
+task rather than being called directly; see
 [Repository layout](../repository-layout/).
 
 ## Start here
