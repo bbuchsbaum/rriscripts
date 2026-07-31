@@ -9,8 +9,15 @@ from one scan's files to an entire project.
 
 ## Requirements
 
-R with the `optparse` and `xnatR` packages. There is no installer — this is a
-single script used from a clone:
+R with the `optparse` and `xnatR` packages:
+
+```r
+install.packages("optparse")
+remotes::install_github("bbuchsbaum/xnatR")
+```
+
+`xnatR` is loaded on demand, so `help` works without it. There is no installer —
+this is a single script used from a clone:
 
 ```bash
 Rscript xnat_cli/xnat_cli.R help

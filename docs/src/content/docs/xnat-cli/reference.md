@@ -156,9 +156,12 @@ All filters optional:
 - The browse and download commands call `xnatR::authenticate_xnat()` themselves
   before issuing requests, so they work from stored config or an active session
   without an explicit `authenticate` step.
-- The CLI checks that the functions it needs exist in the installed `xnatR` and
-  fails with a clear message if the package is out of date:
-  `Error: xnatR::<fn>() is not available in the installed xnatR package.`
+- `xnatR` is loaded on demand rather than at startup, so `help` and
+  `help <command>` work without it installed. Every other command checks first
+  and reports the install command if it is missing.
+- The CLI also checks that the specific functions it needs exist in the
+  installed `xnatR`, and fails with a clear message if the package is out of
+  date: `Error: xnatR::<fn>() is not available in the installed xnatR package.`
 - `download_all` determines subject identifiers from the first of `ID`, `id`,
   `label`, or `subject_id` present in the `list_subjects()` output, and errors if
   none of them are.

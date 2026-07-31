@@ -1,7 +1,10 @@
 #!/usr/bin/env Rscript
 
 suppressPackageStartupMessages(library("optparse"))
-suppressPackageStartupMessages(library("xnatR"))
+
+# xnatR is loaded on demand rather than here: every call site is namespaced as
+# xnatR::, and `help` should work on a machine that has no XNAT client
+# installed. require_xnat_package() below is called for every other command.
 
 args <- commandArgs(trailingOnly = TRUE)
 
@@ -202,7 +205,19 @@ split_columns <- function(value) {
   trimws(strsplit(value, ",", fixed = TRUE)[[1]])
 }
 
+require_xnat_package <- function() {
+  if (!requireNamespace("xnatR", quietly = TRUE)) {
+    quit_error(
+      "Error: the 'xnatR' package is required for this command but is not installed.\n",
+      "Install it with:\n",
+      "  Rscript -e 'remotes::install_github(\"bbuchsbaum/xnatR\")'\n",
+      "The 'help' command works without it."
+    )
+  }
+}
+
 require_function <- function(fn) {
+  require_xnat_package()
   if (!exists(fn, asNamespace("xnatR"), inherits = FALSE)) {
     quit_error(
       "Error: xnatR::", fn, "() is not available in the installed xnatR package. ",
@@ -574,7 +589,13 @@ if (identical(command, "help")) {
   } else {
     command_help(options[1])
   }
-} else if (identical(command, "init")) {
+  quit(status = 0)
+}
+
+# Everything past this point talks to XNAT.
+require_xnat_package()
+
+if (identical(command, "init")) {
   init_command()
 } else if (identical(command, "authenticate")) {
   authenticate_command(options)

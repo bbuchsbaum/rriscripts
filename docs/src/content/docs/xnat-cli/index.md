@@ -18,8 +18,12 @@ R with the `optparse` and `xnatR` packages:
 
 ```r
 install.packages("optparse")
-# xnatR: install from wherever your lab hosts it
+remotes::install_github("bbuchsbaum/xnatR")
 ```
+
+`xnatR` is loaded on demand, so `help` works without it — useful for reading the
+command reference on a machine that has no XNAT client installed. Every other
+command reports what to install if it is missing.
 
 Unlike `qexec` and `fmriprep`, this tool has no installer — it is a single
 script used directly from a clone of the repository:
