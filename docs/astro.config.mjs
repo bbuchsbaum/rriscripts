@@ -65,6 +65,10 @@ export default defineConfig({
             { label: "Reference", slug: "xnat-cli/reference" },
           ],
         },
+        {
+          label: "Appendix",
+          items: [{ label: "Repository layout", slug: "repository-layout" }],
+        },
       ],
     }),
   ],

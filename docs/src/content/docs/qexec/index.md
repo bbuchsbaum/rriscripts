@@ -12,24 +12,36 @@ Nothing here replaces SLURM — `qexec.sh` computes an `sbatch`/`salloc`
 invocation and runs it. `--dry-run` prints exactly what it would submit, which
 makes it easy to check your reasoning before spending an allocation.
 
-## The tools
+## The commands
 
-| Script | Purpose |
+Most work uses one or two of these. Start with `qexec.sh`; reach for the others
+when your commands come from somewhere other than a file you wrote by hand.
+
+**Submitting**
+
+| Command | Use it when |
 |---|---|
-| `qexec.sh` | Main SLURM launcher. Submits batch jobs with `sbatch`, interactive jobs with `salloc`, command files as arrays, and packed command files with a per-task concurrency cap. |
-| `cmd_expand.sh` | Expands bracket expressions into concrete command lines. Use it to generate command files or pipe commands into `send_slurm.sh`. |
-| `batch_exec.sh` | Expands a parameterized command with `cmd_expand.sh`, then submits the generated commands as a SLURM array job using `command_distributor.sh`. |
-| `bexec.sh` | Submits an existing command file as a batched SLURM array job using `command_distributor.sh`. |
-| `command_distributor.sh` | Runs inside a SLURM array task, selects that task's slice of a command file, and executes the slice with GNU Parallel. |
-| `send_slurm.sh` | Reads commands from stdin, persists them under `.qexec-state` or `--state-dir`, and submits them as one command per SLURM array task or as packed batches with `--pack`. |
-| `rjobtop.py` | Shows live CPU and memory use for a running SLURM job. |
-| `slurm_job_monitor.sh` | Polls SLURM jobs until completion and reports efficiency with `seff` when available. |
-| `qexec_gui.tcl` | Tcl/Tk GUI for `qexec.sh`. |
-| `batch_exec_gui.tcl` | Tcl/Tk GUI for `batch_exec.sh`. |
-| `batch_exec_gui` | Convenience launcher for `batch_exec_gui.tcl`. |
+| `qexec.sh` | You have a command, an interactive session, or a command file. Does all of it. |
+| `bexec.sh` | You have a command file and want the batched-array defaults without spelling them out. |
+| `batch_exec.sh` | Your commands follow a pattern like `--sub [1..100]`. |
+| `send_slurm.sh` | Your commands arrive on stdin, from `cmd_expand.sh` or something else. |
 
-Haskell implementations of several core tools (`qexec.hs`, `cmd_expand.hs`,
-`bexec.hs`, `command_distributor.hs`) also live in the directory.
+**Generating**
+
+| Command | Use it when |
+|---|---|
+| `cmd_expand.sh` | You want to turn `[1..100]` into concrete command lines, and look at them before submitting. |
+
+**Watching**
+
+| Command | Use it when |
+|---|---|
+| `rjobtop.py` | A job is running and you want live CPU and memory use. |
+| `slurm_job_monitor.sh` | You want to be told when jobs finish, with efficiency stats. |
+
+Optional Tcl/Tk frontends (`qexec_gui.tcl`, `batch_exec_gui.tcl`) and Haskell
+reimplementations of several tools also ship in the directory; see
+[Repository layout](../repository-layout/).
 
 ## Start here
 

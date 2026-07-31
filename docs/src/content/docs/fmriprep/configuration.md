@@ -77,7 +77,7 @@ study.
 | `fs_reconall` | bool | `false` | Run FreeSurfer `recon-all`; generated project configs set this to `true` |
 | `use_syn_sdc` | bool | `false` | Enable SyN-based fieldmap-less distortion correction |
 | `cifti_output` | bool | `false` | Generate CIFTI outputs |
-| `use_aroma` | bool | `false` | **Deprecated** — removed in fMRIPrep ≥ 23.1.0 |
+| `use_aroma` | bool | `false` | **Deprecated.** ICA-AROMA was removed in fMRIPrep ≥ 23.1.0; the launcher errors if this is set. Delete it from configs carried over from older studies |
 | `extra` | string | — | Extra flags appended verbatim to the fMRIPrep command |
 | `subjects` | string | — | `all` or a space-separated list (e.g. `sub-01 sub-02`) |
 

@@ -46,21 +46,7 @@ curl -fsSL https://raw.githubusercontent.com/bbuchsbaum/rriscripts/main/fmriprep
 `questionary` (`pip install --user questionary`) is optional but improves the
 wizard UX.
 
-## What's in this directory
-
-| File | Purpose |
-|---|---|
-| `fmriprep_launcher.py` | Main CLI entrypoint. |
-| `fmriprep_backend.py` | `BuildConfig`, command construction, SLURM template, manifest I/O. |
-| `fmriprep_shared.py` | INI loading, runtime detection, subject discovery, memory parsing. |
-| `fmriprep_tui_autocomplete.py` | Optional Textual TUI (`pip install textual`). |
-| `fmriprep_gui_tk.py` | Optional Tk GUI (needs Tk and an X11 display). |
-| `fmriprep.ini.example` | Annotated example covering user-level and project-level keys. |
-| `run_fmriprep_wizard.sh` | Convenience wrapper that activates a likely venv before launching the wizard. |
-| `install.sh` | One-shot installer. |
-| `tests/` | Unit tests (`python3 -m unittest tests.test_backend`). |
-
-## Deprecated
-
-**ICA-AROMA** (`--use-aroma`) was removed from fMRIPrep ≥ 23.1.0. The launcher
-raises an error if this option is set.
+There is one command you run — `fmriprep_launcher.py`. Everything else in the
+directory is either an optional frontend it can launch for you or an internal
+module it imports; see [Repository layout](../repository-layout/) if you need
+the map.
