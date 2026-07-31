@@ -64,7 +64,7 @@ study.
 |---|---|---|---|
 | `bids` | path | *(required)* | BIDS dataset root directory |
 | `out` | path | *(required)* | Output directory (usually `<bids>/derivatives/fmriprep`) |
-| `work` | path | *(required)* | Working directory (use fast scratch storage) |
+| `work` | path | *(required)* | Working directory (use fast scratch storage). Acts as a base: a relative `--work` is taken as a subdirectory of it — see [A base work directory](../workflow/#a-base-work-directory-with-per-run-subdirectories) |
 | `runtime` | string | `auto` | Container runtime: `singularity`, `docker`, `fmriprep-docker`, or `auto` |
 | `container` | path/string | `auto` | Path to `.sif` file, Docker `image:tag`, or `auto` to search `$FMRIPREP_SIF_DIR` |
 | `fs_license` | path | `$FS_LICENSE` | Path to FreeSurfer `license.txt` |

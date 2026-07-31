@@ -262,55 +262,49 @@ read-only from compute nodes, a bundle there dies before fMRIPrep starts. See
 [Cluster notes](../cluster-notes/).
 :::
 
-## How paths on the command line are resolved
+## A base work directory, with per-run subdirectories
 
-Every path flag — `--work`, `--bids`, `--out`, `--script-outdir` — is resolved
-against your **current working directory**, and **replaces** the config value
-rather than extending it.
-
-This matters most for `--work`, because a bare name looks like it might mean
-"a subdirectory of my configured work directory". It does not:
+Set `work` once in your config and it acts as a **base**. A relative `--work` is
+then taken as a subdirectory of it, so you can give each run its own scratch
+space without retyping the path:
 
 ```ini
-# fmriprep.ini
+# ~/.config/fmriprep/config.ini
 [defaults]
 work = /scratch/myuser/fmriprep-work
 ```
 
 ```bash
-cd /home/myuser/my_study
-fmriprep_launcher.py slurm-array --work work1
-# work dir becomes /home/myuser/my_study/work1
-# NOT /scratch/myuser/fmriprep-work/work1
+fmriprep_launcher.py slurm-array --work run2
+# work dir: /scratch/myuser/fmriprep-work/run2
 ```
 
-The configured `/scratch/myuser/fmriprep-work` is discarded entirely, and you
-get a work directory on your home filesystem — usually the worst place for one,
-since it is small, slow, and often not writable from compute nodes.
+This is the point of keeping `work` in the user config: the volatile part of the
+path is the run name, not the filesystem it lives on.
 
-To get a subdirectory of the configured location, write it out:
+The rules:
 
-```bash
-fmriprep_launcher.py slurm-array --work /scratch/myuser/fmriprep-work/work1
-```
+| `--work` | Result |
+|---|---|
+| omitted | The configured `work` exactly |
+| relative (`run2`, `study/run2`) | Joined onto the configured `work` |
+| absolute (`/scratch/other/w`) | Used exactly as given, config ignored |
+| relative, with no `work` configured | Resolved against the current directory |
 
-Or, since per-dataset values belong in the project config anyway, set it there
-and pass no flag at all:
-
-```ini
-[defaults]
-work = /scratch/myuser/fmriprep-work/work1
-```
-
-:::caution
-Nothing warns you about this. The work directory is not created at generation
-time — the path is baked into the sbatch and created on the compute node at
-runtime — so a misplaced `--work` surfaces as a slow run or an out-of-space
-error partway in, not as an error when you generate the bundle.
-
-`probe` and the generated `fmriprep_array.sbatch` both show the resolved
-absolute path. Check `WORK_DIR=` near the top of the script before submitting.
+:::note
+`--work` is the only path flag that composes this way. `--bids`, `--out`, and
+`--script-outdir` all resolve against your current working directory and replace
+the configured value outright. Work directories get the special treatment
+because they belong on scratch, and resolving a bare name against wherever you
+happened to be standing tends to land one on home or project storage — small,
+slow, and on some clusters not writable from compute nodes at all.
 :::
+
+Whichever form you use, the generated script records the resolved absolute path.
+Check `WORK_DIR=` near the top of `fmriprep_array.sbatch` before submitting —
+the directory itself is not created until the job runs on a compute node, so a
+wrong path shows up as a failure partway in rather than an error at generation
+time.
 
 ## The interactive paths
 
