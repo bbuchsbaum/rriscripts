@@ -251,7 +251,7 @@ The bundle contains:
 | Path | Purpose |
 |---|---|
 | `fmriprep_array.sbatch` | The SLURM script you submit |
-| `subjects.txt` | One line per array task |
+| `subjects.txt` | The work list — one line per array task, indexed by `$SLURM_ARRAY_TASK_ID`. See [What `subjects.txt` is](../subcommands/#what-subjectstxt-is). |
 | `job_manifest.json` | Config snapshot used by `rerun-failed` |
 | `status/` | Per-subject `.running`, `.ok`, `.failed` markers, written at runtime |
 
@@ -260,6 +260,56 @@ The bundle directory must be writable **from compute nodes**, because `status/`
 markers are updated while the array job runs. On clusters that mount `/project`
 read-only from compute nodes, a bundle there dies before fMRIPrep starts. See
 [Cluster notes](../cluster-notes/).
+:::
+
+## How paths on the command line are resolved
+
+Every path flag — `--work`, `--bids`, `--out`, `--script-outdir` — is resolved
+against your **current working directory**, and **replaces** the config value
+rather than extending it.
+
+This matters most for `--work`, because a bare name looks like it might mean
+"a subdirectory of my configured work directory". It does not:
+
+```ini
+# fmriprep.ini
+[defaults]
+work = /scratch/myuser/fmriprep-work
+```
+
+```bash
+cd /home/myuser/my_study
+fmriprep_launcher.py slurm-array --work work1
+# work dir becomes /home/myuser/my_study/work1
+# NOT /scratch/myuser/fmriprep-work/work1
+```
+
+The configured `/scratch/myuser/fmriprep-work` is discarded entirely, and you
+get a work directory on your home filesystem — usually the worst place for one,
+since it is small, slow, and often not writable from compute nodes.
+
+To get a subdirectory of the configured location, write it out:
+
+```bash
+fmriprep_launcher.py slurm-array --work /scratch/myuser/fmriprep-work/work1
+```
+
+Or, since per-dataset values belong in the project config anyway, set it there
+and pass no flag at all:
+
+```ini
+[defaults]
+work = /scratch/myuser/fmriprep-work/work1
+```
+
+:::caution
+Nothing warns you about this. The work directory is not created at generation
+time — the path is baked into the sbatch and created on the compute node at
+runtime — so a misplaced `--work` surfaces as a slow run or an out-of-space
+error partway in, not as an error when you generate the bundle.
+
+`probe` and the generated `fmriprep_array.sbatch` both show the resolved
+absolute path. Check `WORK_DIR=` near the top of the script before submitting.
 :::
 
 ## The interactive paths

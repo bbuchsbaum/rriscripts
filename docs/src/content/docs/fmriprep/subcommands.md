@@ -54,16 +54,54 @@ fmriprep_launcher.py slurm-array \
 Writes a complete bundle to `$SCRATCH/<bids-basename>_fmriprep_job/` when
 `$SCRATCH` is set, otherwise `./fmriprep_job/`:
 
-- `fmriprep_array.sbatch` — the SLURM script
-- `subjects.txt` — one line per array task
-- `job_manifest.json` — config snapshot used by `rerun-failed`
-- `status/` — per-subject `.running`, `.ok`, `.failed` markers populated at runtime
+| File | What it is |
+|---|---|
+| `fmriprep_array.sbatch` | The SLURM script you submit |
+| `subjects.txt` | The work list — see below |
+| `job_manifest.json` | Config snapshot used by `rerun-failed` |
+| `status/` | Per-subject `.running`, `.ok`, `.failed` markers, written at runtime |
 
 Then submit it yourself:
 
 ```bash
 sbatch /path/to/bundle/fmriprep_array.sbatch
 ```
+
+### What `subjects.txt` is
+
+`subjects.txt` is how the array job knows what to work on. Each **line** is one
+array task, and `$SLURM_ARRAY_TASK_ID` indexes into it — task 0 processes line
+1, task 1 line 2, and so on. The `#SBATCH --array` range is set to match the
+number of lines.
+
+By default that is one subject per line:
+
+```text
+sub-01
+sub-02
+sub-03
+sub-04
+sub-05
+```
+
+giving `#SBATCH --array=0-4` — five tasks, one subject each.
+
+With `--subjects-per-job 2`, subjects are grouped and each line holds a
+space-separated batch:
+
+```text
+sub-01 sub-02
+sub-03 sub-04
+sub-05
+```
+
+giving `#SBATCH --array=0-2` — three tasks, and the task that gets a
+multi-subject line runs them in parallel via `xargs`. The last line holds the
+remainder when the count does not divide evenly.
+
+Because it is a plain text file, you can edit it before submitting: delete lines
+to skip subjects, or reorder them. Just keep the `--array` range in the sbatch
+consistent with the number of lines.
 
 ### Batching subjects per task
 
