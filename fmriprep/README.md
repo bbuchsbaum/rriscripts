@@ -91,8 +91,30 @@ launcher auto-discovers local Docker images.
 ### 2. A FreeSurfer license
 
 Get a free license at <https://surfer.nmr.mgh.harvard.edu/registration.html>
-and save it somewhere readable by your jobs, e.g.
-`/project/def-piname/shared/bin/license.txt`.
+and save the returned file as `license.txt`. fMRIPrep needs that file inside
+the container, so put it on a filesystem visible to the compute nodes running
+your SLURM jobs.
+
+For a lab-shared setup, use a shared project path:
+
+```bash
+mkdir -p /project/def-piname/shared/freesurfer
+cp license.txt /project/def-piname/shared/freesurfer/license.txt
+chmod a+r /project/def-piname/shared/freesurfer/license.txt
+```
+
+Then set this once in your user-level config:
+
+```ini
+[defaults]
+fs_license = /project/def-piname/shared/freesurfer/license.txt
+```
+
+For a private per-user setup, use a path that compute jobs can read, such as
+`$HOME/.licenses/freesurfer/license.txt` if home directories are mounted on
+compute nodes, or `$SCRATCH/.licenses/freesurfer/license.txt` if they are not.
+You can also set `FS_LICENSE=/path/to/license.txt`, but the config key is more
+explicit and easier to share in project run notes.
 
 ### 3. A populated TemplateFlow cache
 
