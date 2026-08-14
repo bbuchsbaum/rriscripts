@@ -207,7 +207,7 @@ SLURM_TEMPLATE = """\
 #SBATCH --time={time}
 #SBATCH --cpus-per-task={cpus_per_task}
 {mem_line}#SBATCH --nodes=1
-#SBATCH --array=0-{array_max}
+{exclusive_line}#SBATCH --array={array_spec}
 #SBATCH --output={log_dir}/%x_%A_%a.out
 #SBATCH --error={log_dir}/%x_%A_%a.err
 {account_line}{mail_line}{module_line}
@@ -225,6 +225,7 @@ CONTAINER="{container}"
 OMP_THREADS="{omp_threads}"
 NPROCS="{nprocs}"
 MEM_MB="{mem_mb}"
+PARALLEL_SUBJECTS="{parallel_subjects}"
 EXTRA_FLAGS="{extra_flags}"
 SKIP_BIDS_VAL="{skip_bids_val}"
 OUTPUT_SPACES="{output_spaces}"
@@ -244,6 +245,7 @@ fi
 IFS=' ' read -ra SUBJECTS <<< "$SUBJECT_LINE"
 NUM_SUBJECTS=${{#SUBJECTS[@]}}
 echo "=== Processing $NUM_SUBJECTS subject(s) in this job ==="
+echo "=== Running at most $PARALLEL_SUBJECTS subject(s) concurrently ==="
 for SUB in "${{SUBJECTS[@]}}"; do
   echo "  - $SUB"
 done
@@ -342,7 +344,7 @@ if [[ "$RUNTIME" == "singularity" ]]; then
   export CLI_BASE_STR
 
   if [[ $NUM_SUBJECTS -gt 1 ]]; then
-    printf '%s\n' "${{SUBJECTS[@]}}" | xargs -P $NUM_SUBJECTS -I {{}} bash -c 'run_subject "$@"' _ {{}}
+    printf '%s\n' "${{SUBJECTS[@]}}" | xargs -P "$PARALLEL_SUBJECTS" -I {{}} bash -c 'run_subject "$@"' _ {{}}
   else
     run_subject "${{SUBJECTS[0]}}"
   fi
@@ -375,7 +377,7 @@ elif [[ "$RUNTIME" == "fmriprep-docker" ]]; then
   export BIDS_DIR OUT_DIR WORK_DIR FS_LICENSE TEMPLATEFLOW_HOST BIND_TEMPLATEFLOW STATUS_DIR
 
   if [[ $NUM_SUBJECTS -gt 1 ]]; then
-    printf '%s\n' "${{SUBJECTS[@]}}" | xargs -P $NUM_SUBJECTS -I {{}} bash -c 'run_subject_wrapper "$@"' _ {{}}
+    printf '%s\n' "${{SUBJECTS[@]}}" | xargs -P "$PARALLEL_SUBJECTS" -I {{}} bash -c 'run_subject_wrapper "$@"' _ {{}}
   else
     run_subject_wrapper "${{SUBJECTS[0]}}"
   fi
@@ -422,7 +424,7 @@ elif [[ "$RUNTIME" == "docker" ]]; then
   export CLI_BASE_STR
 
   if [[ $NUM_SUBJECTS -gt 1 ]]; then
-    printf '%s\n' "${{SUBJECTS[@]}}" | xargs -P $NUM_SUBJECTS -I {{}} bash -c 'run_subject_docker "$@"' _ {{}}
+    printf '%s\n' "${{SUBJECTS[@]}}" | xargs -P "$PARALLEL_SUBJECTS" -I {{}} bash -c 'run_subject_docker "$@"' _ {{}}
   else
     run_subject_docker "${{SUBJECTS[0]}}"
   fi
@@ -448,6 +450,9 @@ def create_slurm_script(
     status_dir: Path,
     module_singularity: bool = True,
     job_name: str = "fmriprep",
+    parallel_subjects: int = 1,
+    array_concurrency: Optional[int] = None,
+    exclusive: bool = False,
 ) -> str:
     try:
         n = len([l for l in subject_file.read_text().splitlines() if l.strip() and not l.strip().startswith("#")])
@@ -455,6 +460,10 @@ def create_slurm_script(
         n = 0
     if n == 0:
         raise ValueError(f"No subjects found in {subject_file}. Cannot generate SLURM array script with zero subjects.")
+    if parallel_subjects < 1:
+        raise ValueError("parallel_subjects must be a positive integer")
+    if array_concurrency is not None and array_concurrency < 1:
+        raise ValueError("array_concurrency must be a positive integer")
 
     account_line = f"#SBATCH --account={account}\n" if account else ""
     mail_line = ""
@@ -464,6 +473,10 @@ def create_slurm_script(
             mail_line += f"#SBATCH --mail-type={mail_type}\n"
     module_line = "module load singularity\n" if module_singularity and cfg.container_runtime == "singularity" else ""
     mem_line = f"#SBATCH --mem={mem}\n" if mem and mem.lower() != "none" else ""
+    exclusive_line = "#SBATCH --exclusive\n" if exclusive else ""
+    array_spec = f"0-{n - 1}"
+    if array_concurrency is not None:
+        array_spec += f"%{array_concurrency}"
     templateflow_path = resolve_templateflow_home(cfg) or ""
 
     return SLURM_TEMPLATE.format(
@@ -472,7 +485,8 @@ def create_slurm_script(
         time=time,
         cpus_per_task=cpus_per_task,
         mem_line=mem_line,
-        array_max=n - 1,
+        exclusive_line=exclusive_line,
+        array_spec=array_spec,
         log_dir=str(log_dir),
         account_line=account_line,
         mail_line=mail_line,
@@ -488,6 +502,7 @@ def create_slurm_script(
         omp_threads=cfg.omp_threads,
         nprocs=cfg.nprocs,
         mem_mb=cfg.mem_mb,
+        parallel_subjects=parallel_subjects,
         extra_flags=cfg.extra,
         skip_bids_val="1" if cfg.skip_bids_validation else "0",
         output_spaces=cfg.output_spaces or "",
@@ -542,9 +557,14 @@ def build_job_manifest(
     job_name: str,
     module_singularity: bool,
     subjects_per_job: int,
+    parallel_subjects: int = 1,
+    array_concurrency: Optional[int] = None,
+    exclusive: bool = False,
+    cpus_per_task_auto: bool = False,
+    mem_auto: bool = False,
 ) -> dict:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "build_config": {
             "bids": str(cfg.bids),
             "out": str(cfg.out),
@@ -583,12 +603,28 @@ def build_job_manifest(
             "job_name": job_name,
             "module_singularity": module_singularity,
             "subjects_per_job": subjects_per_job,
+            "parallel_subjects": parallel_subjects,
+            "array_concurrency": array_concurrency,
+            "exclusive": exclusive,
+            "cpus_per_task_auto": cpus_per_task_auto,
+            "mem_auto": mem_auto,
         },
     }
 
 
 def build_config_from_manifest(manifest: dict, subjects: Optional[List[str]] = None) -> BuildConfig:
     cfg = manifest["build_config"]
+    nprocs = int(cfg["nprocs"])
+    mem_mb = int(cfg["mem_mb"])
+    # Schema 1 stored aggregate per-array-task resources in BuildConfig when
+    # subjects_per_job was greater than one. Schema 2 stores the limits passed
+    # to each independent fMRIPrep process. Convert old manifests so reruns do
+    # not preserve the historical N-fold oversubscription bug.
+    if int(manifest.get("schema_version", 1)) == 1:
+        old_batch_size = int(manifest.get("slurm", {}).get("subjects_per_job", 1))
+        if old_batch_size > 1:
+            nprocs = max(1, nprocs // old_batch_size)
+            mem_mb = max(1, mem_mb // old_batch_size)
     return BuildConfig(
         bids=Path(cfg["bids"]),
         out=Path(cfg["out"]),
@@ -599,8 +635,8 @@ def build_config_from_manifest(manifest: dict, subjects: Optional[List[str]] = N
         fs_license=Path(cfg["fs_license"]),
         templateflow_home=Path(cfg["templateflow_home"]) if cfg.get("templateflow_home") else None,
         omp_threads=int(cfg["omp_threads"]),
-        nprocs=int(cfg["nprocs"]),
-        mem_mb=int(cfg["mem_mb"]),
+        nprocs=nprocs,
+        mem_mb=mem_mb,
         extra=cfg.get("extra", ""),
         skip_bids_validation=bool(cfg.get("skip_bids_validation", False)),
         output_spaces=cfg.get("output_spaces"),

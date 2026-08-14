@@ -14,7 +14,7 @@ Features
 - Choose runtime: Singularity/Apptainer, fmriprep-docker, or Docker
 - Choose container/version (discover *.sif/.simg via $FMRIPREP_SIF_DIR, or list Docker images)
 - Pick output/work dirs, FS license path
-- Capacity-aware defaults (from SLURM env or system); live check that nprocs*omp <= cpus-per-task
+- Capacity-aware defaults (from SLURM env or system) with clear per-subject and task scopes
 - Popular fMRIPrep flags (skip bids validation, AROMA, CIFTI, recon-all, SyN SDC, output spaces, extra flags)
 - Optional TemplateFlow cache binding
 - Preview per-subject commands
@@ -51,7 +51,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("fMRIPrep GUI (Tk)")
-        self.geometry("1000x740")
+        self.geometry("1000x800")
         self.minsize(900, 680)
 
         self._build_vars()
@@ -69,7 +69,7 @@ class App(tk.Tk):
         self.bind_tf = tk.BooleanVar(value=True)
 
         # Resources
-        self.cpus_per_task = tk.IntVar(value=4)
+        self.cpus_per_task = tk.StringVar(value="")
         self.nprocs = tk.IntVar(value=4)
         self.omp = tk.IntVar(value=2)
         self.mem_mb = tk.IntVar(value=8000)
@@ -92,10 +92,14 @@ class App(tk.Tk):
         self.slurm_mail_type = tk.StringVar(value="END,FAIL")
         self.slurm_job_name = tk.StringVar(value="fmriprep")
         self.slurm_module_sing = tk.BooleanVar(value=True)
+        self.subjects_per_job = tk.IntVar(value=1)
+        self.parallel_subjects = tk.IntVar(value=1)
+        self.array_concurrency = tk.StringVar(value="")
+        self.slurm_exclusive = tk.BooleanVar(value=False)
         self.script_outdir = tk.StringVar(value="fmriprep_job")
 
         # Derived/warnings
-        self.threads_label = tk.StringVar(value="Effective threads: nprocs × omp = 0 (<= cpus-per-task?)")
+        self.threads_label = tk.StringVar(value="Per-subject and task CPU allocation")
         self.subjects = []
 
     def _build_ui(self):
@@ -159,13 +163,13 @@ class App(tk.Tk):
         frm_res = ttk.LabelFrame(self, text="Resources")
         frm_res.pack(fill="x", **pad)
 
-        ttk.Label(frm_res, text="cpus-per-task (Slurm)").grid(row=0, column=0, sticky="w")
+        ttk.Label(frm_res, text="cpus-per-task total (blank = auto)").grid(row=0, column=0, sticky="w")
         ttk.Entry(frm_res, textvariable=self.cpus_per_task, width=10).grid(row=0, column=1, sticky="w")
-        ttk.Label(frm_res, text="nprocs").grid(row=0, column=2, sticky="w")
+        ttk.Label(frm_res, text="nprocs/subject").grid(row=0, column=2, sticky="w")
         ttk.Entry(frm_res, textvariable=self.nprocs, width=10).grid(row=0, column=3, sticky="w")
-        ttk.Label(frm_res, text="omp-nthreads").grid(row=0, column=4, sticky="w")
+        ttk.Label(frm_res, text="omp-nthreads/process").grid(row=0, column=4, sticky="w")
         ttk.Entry(frm_res, textvariable=self.omp, width=10).grid(row=0, column=5, sticky="w")
-        ttk.Label(frm_res, text="mem-mb").grid(row=0, column=6, sticky="w")
+        ttk.Label(frm_res, text="mem-mb/subject").grid(row=0, column=6, sticky="w")
         ttk.Entry(frm_res, textvariable=self.mem_mb, width=12).grid(row=0, column=7, sticky="w")
         ttk.Button(frm_res, text="Auto-fill", command=self._auto_defaults).grid(row=0, column=8, sticky="e")
 
@@ -203,7 +207,7 @@ class App(tk.Tk):
         ttk.Label(frm_slurm, text="time").grid(row=0, column=2, sticky="w")
         ttk.Entry(frm_slurm, textvariable=self.slurm_time, width=12).grid(row=0, column=3, sticky="w")
 
-        ttk.Label(frm_slurm, text="--mem").grid(row=0, column=4, sticky="w")
+        ttk.Label(frm_slurm, text="--mem total/task").grid(row=0, column=4, sticky="w")
         ttk.Entry(frm_slurm, textvariable=self.slurm_mem, width=10).grid(row=0, column=5, sticky="w")
         ttk.Label(frm_slurm, text="(leave blank to auto from mem-mb)").grid(row=0, column=6, sticky="w")
 
@@ -217,9 +221,17 @@ class App(tk.Tk):
         ttk.Entry(frm_slurm, textvariable=self.slurm_job_name, width=12).grid(row=1, column=7, sticky="w")
         ttk.Checkbutton(frm_slurm, text="module load singularity", variable=self.slurm_module_sing).grid(row=1, column=8, sticky="w")
 
-        ttk.Label(frm_slurm, text="Script output dir").grid(row=2, column=0, sticky="w")
-        ttk.Entry(frm_slurm, textvariable=self.script_outdir, width=30).grid(row=2, column=1, columnspan=3, sticky="we")
-        ttk.Button(frm_slurm, text="Browse", command=lambda: self._pick_dir(self.script_outdir)).grid(row=2, column=4, sticky="w")
+        ttk.Label(frm_slurm, text="subjects/task").grid(row=2, column=0, sticky="w")
+        ttk.Entry(frm_slurm, textvariable=self.subjects_per_job, width=8).grid(row=2, column=1, sticky="w")
+        ttk.Label(frm_slurm, text="parallel subjects/task").grid(row=2, column=2, sticky="w")
+        ttk.Entry(frm_slurm, textvariable=self.parallel_subjects, width=8).grid(row=2, column=3, sticky="w")
+        ttk.Label(frm_slurm, text="max active array tasks").grid(row=2, column=4, sticky="w")
+        ttk.Entry(frm_slurm, textvariable=self.array_concurrency, width=8).grid(row=2, column=5, sticky="w")
+        ttk.Checkbutton(frm_slurm, text="exclusive node per task", variable=self.slurm_exclusive).grid(row=2, column=6, columnspan=2, sticky="w")
+
+        ttk.Label(frm_slurm, text="Script output dir").grid(row=3, column=0, sticky="w")
+        ttk.Entry(frm_slurm, textvariable=self.script_outdir, width=30).grid(row=3, column=1, columnspan=3, sticky="we")
+        ttk.Button(frm_slurm, text="Browse", command=lambda: self._pick_dir(self.script_outdir)).grid(row=3, column=4, sticky="w")
 
         for i in range(9):
             frm_slurm.grid_columnconfigure(i, weight=1)
@@ -235,7 +247,7 @@ class App(tk.Tk):
         self.txt.pack(fill="both", expand=True, padx=6, pady=(0,6))
 
         # Trace changes to update the thread warning
-        for var in (self.cpus_per_task, self.nprocs, self.omp):
+        for var in (self.cpus_per_task, self.nprocs, self.omp, self.parallel_subjects):
             var.trace_add("write", lambda *args: self._update_threads_label())
 
     # --- UI callbacks ---
@@ -316,7 +328,7 @@ class App(tk.Tk):
 
     def _auto_defaults(self):
         cpus, mem = default_resources_from_env()
-        self.cpus_per_task.set(cpus)
+        self.cpus_per_task.set("")
         self.nprocs.set(cpus)
         self.omp.set(min(8, max(1, cpus//8)) if cpus>8 else 1)
         self.mem_mb.set(mem)
@@ -324,16 +336,24 @@ class App(tk.Tk):
 
     def _update_threads_label(self):
         try:
-            eff = int(self.nprocs.get()) * int(self.omp.get())
-            cap = int(self.cpus_per_task.get())
-            msg = f"Effective threads: nprocs × omp = {eff}"
+            per_subject = int(self.nprocs.get())
+            omp_threads = int(self.omp.get())
+            parallel = int(self.parallel_subjects.get())
+            raw_cap = self.cpus_per_task.get().strip()
+            automatic_cap = per_subject * parallel
+            cap = int(raw_cap) if raw_cap else automatic_cap
+            msg = (
+                f"Per subject: nprocs={per_subject}, omp-nthreads={omp_threads}; "
+                f"task CPUs={cap}"
+            )
             if cap > 0:
-                msg += f" (cpus-per-task={cap})"
-                if eff > cap:
-                    msg += "  ⚠ oversubscribed — lower nprocs or omp"
+                source = "explicit" if raw_cap else "automatic"
+                msg += f" ({source})"
+                if cap < automatic_cap:
+                    msg += f"  ⚠ below nprocs × parallel-subjects={automatic_cap}"
             self.threads_label.set(msg)
         except Exception:
-            self.threads_label.set("Effective threads: nprocs × omp = ?")
+            self.threads_label.set("Per-subject and task CPU allocation: ?")
 
     def _selected_subjects(self):
         sel = [self.lst_subjects.get(i) for i in self.lst_subjects.curselection()]
@@ -389,15 +409,57 @@ class App(tk.Tk):
         )
 
         if for_slurm:
+            try:
+                subjects_per_job = int(self.subjects_per_job.get())
+                parallel_subjects = int(self.parallel_subjects.get())
+                array_text = self.array_concurrency.get().strip()
+                array_concurrency = int(array_text) if array_text else None
+                cpus_text = self.cpus_per_task.get().strip()
+                cpus_per_task = (
+                    int(cpus_text)
+                    if cpus_text
+                    else int(self.nprocs.get()) * parallel_subjects
+                )
+            except (ValueError, tk.TclError):
+                messagebox.showerror(
+                    "Error", "Slurm scheduling counts must be whole numbers."
+                )
+                return None
+            if subjects_per_job < 1 or parallel_subjects < 1:
+                messagebox.showerror(
+                    "Error", "Subjects per task and parallel subjects must be positive."
+                )
+                return None
+            if parallel_subjects > subjects_per_job:
+                messagebox.showerror(
+                    "Error", "Parallel subjects cannot exceed subjects per task."
+                )
+                return None
+            if array_concurrency is not None and array_concurrency < 1:
+                messagebox.showerror(
+                    "Error", "Maximum active array tasks must be positive."
+                )
+                return None
+            if cpus_per_task < 1:
+                messagebox.showerror("Error", "CPUs per task must be positive.")
+                return None
             slurm = dict(
                 partition=self.slurm_partition.get().strip() or "compute",
                 time=self.slurm_time.get().strip() or "24:00:00",
-                mem=self.slurm_mem.get().strip() or mb_to_human(int(self.mem_mb.get())),
+                cpus_per_task=cpus_per_task,
+                mem=(
+                    self.slurm_mem.get().strip()
+                    or mb_to_human(int(self.mem_mb.get()) * parallel_subjects)
+                ),
                 account=self.slurm_account.get().strip(),
                 email=self.slurm_email.get().strip(),
                 mail_type=self.slurm_mail_type.get().strip(),
                 job_name=self.slurm_job_name.get().strip() or "fmriprep",
                 module_sing=bool(self.slurm_module_sing.get()),
+                subjects_per_job=subjects_per_job,
+                parallel_subjects=parallel_subjects,
+                array_concurrency=array_concurrency,
+                exclusive=bool(self.slurm_exclusive.get()),
                 script_outdir=Path(self.script_outdir.get()).expanduser()
             )
             return cfg, slurm
@@ -442,7 +504,9 @@ class App(tk.Tk):
         log_dir = outdir / "logs"; log_dir.mkdir(exist_ok=True)
         status_dir = outdir / "status"; status_dir.mkdir(exist_ok=True)
         subj_file = outdir / "subjects.txt"
-        write_subject_batches(subj_file, cfg.subjects)
+        write_subject_batches(
+            subj_file, cfg.subjects, subjects_per_job=sl["subjects_per_job"]
+        )
 
         if len(cfg.subjects) == 0:
             messagebox.showerror("Error", "No subjects selected. Cannot generate SLURM script.")
@@ -453,7 +517,7 @@ class App(tk.Tk):
             subject_file=subj_file,
             partition=sl["partition"],
             time=sl["time"],
-            cpus_per_task=self.cpus_per_task.get(),
+            cpus_per_task=sl["cpus_per_task"],
             mem=sl["mem"],
             account=sl["account"] or None,
             email=sl["email"] or None,
@@ -462,6 +526,9 @@ class App(tk.Tk):
             status_dir=status_dir,
             module_singularity=sl["module_sing"],
             job_name=sl["job_name"],
+            parallel_subjects=sl["parallel_subjects"],
+            array_concurrency=sl["array_concurrency"],
+            exclusive=sl["exclusive"],
         )
         script_path = outdir / "fmriprep_array.sbatch"
         script_path.write_text(slurm_text)

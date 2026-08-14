@@ -41,6 +41,9 @@ account = rrg-mypi
 job_name = fmriprep_mystudy
 script_outdir = /scratch/myuser/my_study_fmriprep_job
 log_dir = /scratch/myuser/my_study_fmriprep_job/logs
+subjects_per_job = 4
+parallel_subjects = 2
+array_concurrency = 3
 ```
 
 ## Config file precedence
@@ -69,9 +72,9 @@ study.
 | `container` | path/string | `auto` | Path to `.sif` file, Docker `image:tag`, or `auto` to search `$FMRIPREP_SIF_DIR` |
 | `fs_license` | path | `$FS_LICENSE` | Path to FreeSurfer `license.txt` |
 | `templateflow_home` | path | `$TEMPLATEFLOW_HOME` | Path to pre-populated TemplateFlow cache |
-| `nprocs` | int | auto-detect | `--nprocs` passed to fMRIPrep |
+| `nprocs` | int | auto-detect | Per-subject `--nprocs` passed unchanged to each independent fMRIPrep process |
 | `omp_threads` | int | `min(8, nprocs)` | `--omp-nthreads` passed to fMRIPrep |
-| `mem_mb` | int/string | ~90% of available | Memory limit in MB (also accepts `32G`, `2T`) |
+| `mem_mb` | int/string | ~90% of available | Per-subject fMRIPrep memory limit in MB (also accepts `32G`, `2T`) |
 | `output_spaces` | string | — | Space-separated list, e.g. `MNI152NLin2009cAsym:res-2 T1w fsnative` |
 | `skip_bids_validation` | bool | `false` | Pass `--skip-bids-validation` |
 | `fs_reconall` | bool | `false` | Run FreeSurfer `recon-all`; generated project configs set this to `true` |
@@ -91,8 +94,12 @@ study.
 | `job_name` | string | `fmriprep` | SLURM job name |
 | `log_dir` | path | `<script_outdir>/logs` | Directory for SLURM stdout/stderr logs |
 | `script_outdir` | path | `$SCRATCH/<bids-basename>_fmriprep_job` if `$SCRATCH` is set, else `./fmriprep_job` | Where to write the generated sbatch and bundle. Must be writable from compute nodes — `status/` is mutated at runtime. |
-| `cpus_per_task` | int | from `nprocs` | Override `--cpus-per-task` in the SLURM header |
-| `mem` | string | from `mem_mb` | SLURM `--mem` value (e.g. `32G`). Use `none` to omit |
+| `subjects_per_job` | int | `1` | Subjects assigned to each array task (`B`); controls the number of lines in `subjects.txt` |
+| `parallel_subjects` | int | `subjects_per_job` | Maximum independent fMRIPrep processes active inside each task (`M`); must be no greater than `subjects_per_job` |
+| `array_concurrency` | int | unlimited by launcher | Maximum active array tasks (`C`); adds `%C` to the Slurm array range but does not guarantee simultaneous starts |
+| `exclusive` | bool | `false` | Request an unshared physical node for each active array task; site policy may override it |
+| `cpus_per_task` | int | `nprocs * parallel_subjects` | Total CPU allocation for each Slurm array task; an explicit value is not scaled again |
+| `mem` | string | `mem_mb * parallel_subjects` | Total Slurm memory allocation for each task (e.g. `32G`); an explicit value is not scaled again. Use `none` to omit |
 | `no_mem` | bool | `false` | Omit `--mem` entirely (for whole-node clusters like Trillium) |
 | `email` | string | — | Email address for SLURM notifications |
 | `mail_type` | string | — | SLURM mail events (e.g. `END,FAIL`) |

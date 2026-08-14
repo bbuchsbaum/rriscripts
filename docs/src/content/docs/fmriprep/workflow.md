@@ -146,8 +146,9 @@ Then submit it yourself:
 sbatch "$JOB_DIR/fmriprep_array.sbatch"
 ```
 
-One array task per subject (or per batch of subjects, with
-`--subjects-per-job`).
+By default this creates one array task per subject. For batching, in-task
+parallelism, array throttling, and exclusive-node placement, see
+[Subject placement and concurrency](../subcommands/#subject-placement-and-concurrency).
 
 ## Step 5 — retry only what failed
 

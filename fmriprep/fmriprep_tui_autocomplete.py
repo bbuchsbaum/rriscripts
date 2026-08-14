@@ -349,19 +349,19 @@ class FMRIPrepAutocompleteTUI(App):
             
             cpus, mem = default_resources_from_env()
             
-            yield Label(f"Processors (--nprocs) [Detected: {cpus}]:")
+            yield Label(f"Per-subject Processors (--nprocs) [Detected: {cpus}]:")
             yield Input(
                 value=str(self.config.get('nprocs', cpus)),
                 id="nprocs"
             )
             
-            yield Label("OMP Threads per processor:")
+            yield Label("OMP Threads per process (--omp-nthreads):")
             yield Input(
                 value=str(self.config.get('omp_threads', 2)),
                 id="omp_threads"
             )
             
-            yield Label(f"Memory in MB [Detected: {mem}]:")
+            yield Label(f"Per-subject Memory in MB [Detected: {mem}]:")
             yield Input(
                 value=str(self.config.get('mem_mb', mem)),
                 id="mem_mb"
@@ -453,11 +453,32 @@ class FMRIPrepAutocompleteTUI(App):
             
             yield Label("Subjects per Job (batching):")
             yield Input(
-                value=str(self.config.get('subjects_per_job', 1)),
+                value=str(self.config.get('slurm_subjects_per_job', 1)),
                 placeholder="1",
                 id="subjects_per_job"
             )
-            yield Static("Process multiple subjects in one job for efficiency", classes="help-text")
+            yield Static("Subjects assigned to each Slurm array task", classes="help-text")
+
+            yield Label("Parallel Subjects per Job:")
+            yield Input(
+                value=str(self.config.get('slurm_parallel_subjects', '')),
+                placeholder="same as subjects per job",
+                id="parallel_subjects"
+            )
+            yield Static("Maximum independent fMRIPrep processes active inside each task", classes="help-text")
+
+            yield Label("Maximum Concurrent Array Tasks:")
+            yield Input(
+                value=str(self.config.get('slurm_array_concurrency', '')),
+                placeholder="unlimited",
+                id="array_concurrency"
+            )
+
+            yield Horizontal(
+                Switch(id="exclusive", value=self.config.get('slurm_exclusive', 'false').lower() == 'true'),
+                Label("Request an unshared node for each array task"),
+                classes="switch-row",
+            )
             
             yield Label("CPUs per Task:")
             yield Input(
@@ -466,7 +487,7 @@ class FMRIPrepAutocompleteTUI(App):
                 id="cpus_per_task"
             )
             
-            yield Label("Memory (e.g., 32G, 64000M):")
+            yield Label("Total Slurm Memory per Task (e.g., 32G, 64000M):")
             yield Input(
                 value=self.config.get('slurm_mem', ''),
                 placeholder="auto",
@@ -720,6 +741,9 @@ class FMRIPrepAutocompleteTUI(App):
         time = self.query_one("#time", Input).value
         account = self.query_one("#account", Input).value
         subjects_per_job = self.query_one("#subjects_per_job", Input).value
+        parallel_subjects = self.query_one("#parallel_subjects", Input).value
+        array_concurrency = self.query_one("#array_concurrency", Input).value
+        exclusive = self.query_one("#exclusive", Switch).value
         cpus_per_task = self.query_one("#cpus_per_task", Input).value
         slurm_mem = self.query_one("#slurm_mem", Input).value
         no_mem = self.query_one("#no_mem", Switch).value
@@ -788,6 +812,12 @@ class FMRIPrepAutocompleteTUI(App):
                 cmd.extend(["--account", account])
             if subjects_per_job and subjects_per_job != "1":
                 cmd.extend(["--subjects-per-job", subjects_per_job])
+            if parallel_subjects:
+                cmd.extend(["--parallel-subjects", parallel_subjects])
+            if array_concurrency:
+                cmd.extend(["--array-concurrency", array_concurrency])
+            if exclusive:
+                cmd.append("--exclusive")
             if cpus_per_task:
                 cmd.extend(["--cpus-per-task", cpus_per_task])
             if no_mem:
@@ -867,6 +897,9 @@ partition = {self.query_one("#partition", Input).value}
 time = {self.query_one("#time", Input).value}
 account = {self.query_one("#account", Input).value}
 subjects_per_job = {self.query_one("#subjects_per_job", Input).value}
+parallel_subjects = {self.query_one("#parallel_subjects", Input).value}
+array_concurrency = {self.query_one("#array_concurrency", Input).value}
+exclusive = {str(self.query_one("#exclusive", Switch).value).lower()}
 cpus_per_task = {self.query_one("#cpus_per_task", Input).value}
 mem = {self.query_one("#slurm_mem", Input).value}
 no_mem = {str(self.query_one("#no_mem", Switch).value).lower()}

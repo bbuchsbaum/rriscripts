@@ -95,45 +95,140 @@ sub-03 sub-04
 sub-05
 ```
 
-giving `#SBATCH --array=0-2` — three tasks, and the task that gets a
-multi-subject line runs them in parallel via `xargs`. The last line holds the
-remainder when the count does not divide evenly.
+giving `#SBATCH --array=0-2` — three tasks. The last line holds the remainder
+when the count does not divide evenly.
+
+Assignment and execution are separate controls. `--subjects-per-job` sets how
+many subjects go on each line; `--parallel-subjects` sets how many independent
+fMRIPrep processes may be active at once inside the task. When the second value
+is smaller, GNU `xargs` runs the assigned subjects in waves. If
+`--parallel-subjects` is omitted, it defaults to `--subjects-per-job`, preserving
+the all-at-once behavior.
 
 Because it is a plain text file, you can edit it before submitting: delete lines
 to skip subjects, or reorder them. Just keep the `--array` range in the sbatch
 consistent with the number of lines.
 
-### Spreading subjects across nodes
+### Subject placement and concurrency
 
-You do not choose the number of nodes directly. You choose **how many subjects
-share a task** with `--subjects-per-job`, and the number of array tasks follows:
+There are three independent scheduling counts:
+
+| Control | Meaning |
+|---|---|
+| `--subjects-per-job B` | Subjects assigned to each array task |
+| `--parallel-subjects M` | Maximum fMRIPrep processes active inside each task; `1 <= M <= B` |
+| `--array-concurrency C` | Maximum array tasks Slurm may run at once; rendered using [Slurm's `%C` array limit](https://slurm.schedmd.com/job_array.html) |
+
+For `S` subjects, the launcher creates:
 
 ```text
-number of array tasks = ceil(subjects / subjects-per-job)
+T = ceil(S / B) array tasks
+maximum active fMRIPrep processes <= min(T, C) x M   (when C is set)
+maximum active fMRIPrep processes <= T x M           (when C is omitted)
 ```
 
-Each array task is one node's allocation, so "how many nodes" is really "how
-many array tasks". To spread `S` subjects across `N` nodes, set
-`--subjects-per-job` to `S / N`.
+These are upper bounds. Slurm may run fewer tasks because of queue state,
+fair-share, or available resources, and the last batch may contain fewer than
+`M` subjects.
+
+Each array task requests `--nodes=1`, so all processes inside one task run in
+one Slurm allocation on one physical node. Different array tasks are separate
+allocations, but Slurm may place them on the same physical node. Add
+`--exclusive` to request an unshared node for each active task. Site policy may
+override exclusivity, and neither arrays nor `%C` guarantee that tasks start at
+the same time.
 
 The examples below assume a per-subject cost of `nprocs = 4` and
-`mem_mb = 8000`, either from your config or auto-detected. The launcher
-multiplies both by the batch size, since the subjects in a task run
-concurrently.
+`mem_mb = 8000`, either from your config or auto-detected. These values are
+passed unchanged to every independent fMRIPrep process. By default, the launcher
+requests `M x 4` CPUs and `M x 8000 MB` for the array task. Explicit
+`--cpus-per-task` or `--mem` values are total task allocations and are not
+scaled again.
 
-#### 20 subjects across 4 nodes
+#### Ten subjects as ten independent tasks
 
 ```bash
-fmriprep_launcher.py slurm-array --subjects all --subjects-per-job 5
+fmriprep_launcher.py slurm-array \
+    --subjects all \
+    --subjects-per-job 1 \
+    --parallel-subjects 1 \
+    --array-concurrency 10 \
+    --exclusive
 ```
 
 ```text
-#SBATCH --array=0-3
-#SBATCH --cpus-per-task=20      # 4 x 5
-#SBATCH --mem=40G               # 8000 MB x 5
+#SBATCH --nodes=1
+#SBATCH --exclusive
+#SBATCH --array=0-9%10
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=8G
 ```
 
-`subjects.txt`:
+There is one subject and one fMRIPrep process per task. Up to ten tasks may be
+active, each requesting an unshared node. This is the closest array-job form of
+"one subject per node," but it is not gang scheduling: Slurm may start the ten
+tasks at different times.
+
+If you need only independent tasks, not exclusive physical nodes, omit
+`--exclusive`. If you do not need to cap active tasks, omit
+`--array-concurrency` as well.
+
+#### Ten subjects in one task, all at once
+
+```bash
+fmriprep_launcher.py slurm-array \
+    --subjects all \
+    --subjects-per-job 10 \
+    --parallel-subjects 10
+```
+
+```text
+#SBATCH --array=0-0
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=40      # 4 x 10 active subjects
+#SBATCH --mem=80G               # 8000 MB x 10 active subjects
+```
+
+All ten independent fMRIPrep processes run inside one task allocation on one
+node. Check that a real node in the partition has 40 CPUs and 80 GB available;
+this shape may wait longer or be rejected if it cannot fit.
+
+#### Ten subjects in one task, two at a time
+
+```bash
+fmriprep_launcher.py slurm-array \
+    --subjects all \
+    --subjects-per-job 10 \
+    --parallel-subjects 2
+```
+
+```text
+#SBATCH --array=0-0
+#SBATCH --cpus-per-task=8       # 4 x 2 active subjects
+#SBATCH --mem=16G               # 8000 MB x 2 active subjects
+```
+
+The one task keeps all ten subjects assigned to it, but `xargs -P 2` runs at
+most two at a time: five waves when runtimes are similar. This is the useful
+distinction between batch size (`B=10`) and in-task concurrency (`M=2`).
+
+#### Twenty subjects in four task allocations
+
+```bash
+fmriprep_launcher.py slurm-array \
+    --subjects all \
+    --subjects-per-job 5 \
+    --parallel-subjects 2 \
+    --array-concurrency 4
+```
+
+```text
+#SBATCH --array=0-3%4
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=16G
+```
+
+`subjects.txt` has four five-subject batches:
 
 ```text
 sub-01 sub-02 sub-03 sub-04 sub-05
@@ -142,61 +237,39 @@ sub-11 sub-12 sub-13 sub-14 sub-15
 sub-16 sub-17 sub-18 sub-19 sub-20
 ```
 
-#### 10 subjects on 1 node
+Up to four array tasks and eight subjects may be active. Each task runs its five
+assigned subjects two at a time. Without `--exclusive`, the four task
+allocations are not guaranteed to occupy four distinct physical nodes.
 
-```bash
-fmriprep_launcher.py slurm-array --subjects all --subjects-per-job 10
-```
+#### Choosing the three counts
 
-```text
-#SBATCH --array=0-0
-#SBATCH --cpus-per-task=40      # 4 x 10
-#SBATCH --mem=80G               # 8000 MB x 10
-```
-
-A single task, all ten subjects running in parallel inside it. Note what that
-asks for: 40 cores and 80 GB on one node. Check it against your partition's
-node size before submitting — this is the shape most likely to sit in the queue
-or be rejected outright.
-
-#### 100 subjects across 10 nodes
-
-```bash
-fmriprep_launcher.py slurm-array --subjects all --subjects-per-job 10
-```
-
-```text
-#SBATCH --array=0-9
-#SBATCH --cpus-per-task=40
-#SBATCH --mem=80G
-```
-
-Ten tasks of ten subjects each. Per-task resources are identical to the previous
-example — only the array range grows, because `--subjects-per-job` sets the task
-size and the subject count sets the task count.
-
-To use smaller nodes instead, shrink the batch: `--subjects-per-job 5` gives 20
-tasks at 20 cores and 40 GB each. Same total work, spread thinner.
-
-#### Choosing a batch size
-
-| Consideration | Pushes toward |
+| Goal or constraint | Adjustment |
 |---|---|
-| Node core/memory limits | Smaller batches |
-| Per-job scheduler overhead, queue limits on array size | Larger batches |
-| Wanting failures isolated to few subjects | Smaller batches |
-| Short per-subject runtimes | Larger batches |
+| Isolate failures and balance uneven subject runtimes | Smaller `B` |
+| Reduce array size and scheduler overhead | Larger `B` |
+| Fit CPU and memory available in one task | Smaller `M` |
+| Finish each batch in fewer waves | Larger `M`, if the node can hold it |
+| Respect a site or allocation limit on active jobs | Smaller `C` |
+| Request distinct, unshared physical nodes | `B=1`, `M=1`, plus `--exclusive` |
 
 A batched task is only as fast as its slowest subject, and it holds the whole
-allocation until the last one finishes. Batches of 2–4 are a reasonable starting
-point; go higher only when you have checked the resulting request fits a real
-node.
+allocation until all assigned subjects finish. A large `B` does not require a
+large allocation when `M` is small; it instead creates more waves inside the
+same allocation.
 
-:::caution
-Throttle concurrent tasks with the SLURM array syntax if your site limits how
-many you may run at once — edit `#SBATCH --array=0-9` to `0-9%3` in the
-generated script to cap it at three at a time.
-:::
+#### Native multi-subject fMRIPrep versus launcher packing
+
+fMRIPrep itself accepts a
+[space-delimited list of participant labels](https://fmriprep.org/en/stable/usage.html)
+in one invocation. That is a different execution model. The launcher currently
+starts one fMRIPrep invocation and one container per subject, gives each subject
+its own work directory and status marker, and uses GNU `xargs -P M` only to
+bound how many are active. It does not expose a single native multi-participant
+invocation as a Slurm mode.
+
+An array also cannot guarantee that several nodes begin together. A workflow
+that requires simultaneous multi-node startup needs a gang-scheduled multi-node
+job (typically coordinated with `srun`), which this launcher does not generate.
 
 See also [Subject batching](../cluster-notes/#subject-batching).
 
@@ -232,9 +305,16 @@ fmriprep_launcher.py rerun-failed \
     --manifest /path/to/fmriprep_job/job_manifest.json \
     --status-dir /path/to/fmriprep_job/status \
     --script-outdir /path/to/fmriprep_rerun \
-    --subjects-per-job 2 \
+    --subjects-per-job 4 \
+    --parallel-subjects 2 \
+    --array-concurrency 3 \
+    --exclusive \
     --job-name fmriprep_retry
 ```
+
+Without overrides, the rerun inherits all four scheduling settings from the
+manifest. If only `--subjects-per-job` is reduced, stored in-task parallelism is
+clamped to the new batch size.
 
 ## `wizard` — interactive setup
 

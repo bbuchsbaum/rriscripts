@@ -40,6 +40,28 @@ fmriprep_launcher.py rerun-failed --manifest "$JOB_DIR/job_manifest.json"
 The wizard, Textual TUI, and Tk GUI are convenience frontends around the same
 backend — not separate primary workflows.
 
+## Scheduling many subjects
+
+Two separate values control packing: `--subjects-per-job B` assigns `B`
+subjects to each Slurm array task, while `--parallel-subjects M` runs at most
+`M` of them concurrently inside that task. For example:
+
+```bash
+# Ten independent tasks; request an unshared node for each active subject.
+fmriprep_launcher.py slurm-array --subjects all \
+  --subjects-per-job 1 --parallel-subjects 1 \
+  --array-concurrency 10 --exclusive
+
+# One task on one node; assign all ten subjects but run only two at a time.
+fmriprep_launcher.py slurm-array --subjects all \
+  --subjects-per-job 10 --parallel-subjects 2
+```
+
+`--array-concurrency` is a cap, not a simultaneous-start guarantee, and array
+tasks need `--exclusive` if they must request distinct unshared nodes. See the
+[full scheduling guide](https://bbuchsbaum.github.io/rriscripts/fmriprep/subcommands/#subject-placement-and-concurrency)
+for resource formulas, all-at-once packing, and Slurm placement limits.
+
 ## Before your first run
 
 You need three things on the cluster: an fMRIPrep container image, a FreeSurfer

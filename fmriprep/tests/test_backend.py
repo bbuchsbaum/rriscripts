@@ -116,9 +116,15 @@ class FMRIPrepBackendTests(unittest.TestCase):
             status_dir=status_dir,
             module_singularity=True,
             job_name="fmriprep_test",
+            parallel_subjects=2,
+            array_concurrency=1,
+            exclusive=True,
         )
 
-        self.assertIn("#SBATCH --array=0-1", script)
+        self.assertIn("#SBATCH --array=0-1%1", script)
+        self.assertIn("#SBATCH --exclusive", script)
+        self.assertIn('PARALLEL_SUBJECTS="2"', script)
+        self.assertIn('xargs -P "$PARALLEL_SUBJECTS"', script)
         self.assertIn('BIND_TEMPLATEFLOW="1"', script)
         self.assertIn('STATUS_DIR="' + str(status_dir) + '"', script)
         self.assertIn('TEMPLATEFLOW_FALLBACK="' + str(self.templateflow) + '"', script)
@@ -154,13 +160,57 @@ class FMRIPrepBackendTests(unittest.TestCase):
             mail_type=None,
             job_name="demo",
             module_singularity=False,
-            subjects_per_job=1,
+            subjects_per_job=2,
+            parallel_subjects=1,
+            array_concurrency=3,
+            exclusive=True,
+            cpus_per_task_auto=True,
+            mem_auto=True,
         )
         restored = build_config_from_manifest(manifest, ["sub-02"])
 
+        self.assertEqual(manifest["schema_version"], 2)
+        self.assertEqual(manifest["slurm"]["subjects_per_job"], 2)
+        self.assertEqual(manifest["slurm"]["parallel_subjects"], 1)
+        self.assertEqual(manifest["slurm"]["array_concurrency"], 3)
+        self.assertTrue(manifest["slurm"]["exclusive"])
         self.assertEqual(restored.subjects, ["sub-02"])
         self.assertFalse(restored.bind_templateflow)
         self.assertEqual(restored.container_runtime, "singularity")
+        self.assertEqual(restored.mem_mb, 32000)
+
+    def test_schema_one_manifest_migrates_aggregate_resources(self):
+        cfg = self.build_cfg(nprocs=16, mem_mb=64000)
+        manifest = build_job_manifest(
+            cfg,
+            script_outdir=self.root / "job",
+            subject_file=self.root / "subjects.txt",
+            status_dir=self.root / "status",
+            log_dir=self.root / "logs",
+            partition="compute",
+            time="12:00:00",
+            cpus_per_task=16,
+            mem="64G",
+            account=None,
+            email=None,
+            mail_type=None,
+            job_name="legacy",
+            module_singularity=False,
+            subjects_per_job=2,
+        )
+        manifest["schema_version"] = 1
+        for key in (
+            "parallel_subjects",
+            "array_concurrency",
+            "exclusive",
+            "cpus_per_task_auto",
+            "mem_auto",
+        ):
+            manifest["slurm"].pop(key)
+
+        restored = build_config_from_manifest(manifest)
+
+        self.assertEqual(restored.nprocs, 8)
         self.assertEqual(restored.mem_mb, 32000)
 
     def test_failed_subjects_discovery_reads_marker_files(self):

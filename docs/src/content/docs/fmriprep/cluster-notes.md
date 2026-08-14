@@ -51,19 +51,25 @@ For large datasets, batch multiple subjects per array task to reduce SLURM
 overhead:
 
 ```bash
-fmriprep_launcher.py slurm-array ... --subjects-per-job 4
+fmriprep_launcher.py slurm-array ... \
+    --subjects-per-job 4 \
+    --parallel-subjects 2
 ```
 
-Each array task then runs 4 subjects in parallel via `xargs`. The launcher
-requests 4× the per-subject CPU and memory for that array task and writes one
-line per subject batch to `subjects.txt`.
+Each array task is assigned four subjects but runs no more than two concurrently
+via GNU `xargs`. The launcher therefore requests 2x the per-subject CPU and
+memory for the task. It writes one four-subject line per batch to
+`subjects.txt`; after the first pair finishes, the remaining pair starts.
+
+`--subjects-per-job` controls assignment. `--parallel-subjects` controls
+within-task execution and defaults to the assignment count when omitted.
+`--array-concurrency` independently caps the number of active array tasks. See
+[Subject placement and concurrency](../subcommands/#subject-placement-and-concurrency)
+for formulas and worked one-node/many-node examples.
 
 The trade-off: a batched task is only as fast as its slowest subject, and if one
 subject fails the others in that task still complete. Batch sizes of 2–4 are a
 reasonable starting point for datasets of a few hundred subjects.
-
-For worked examples mapping subject counts onto node counts, see
-[Spreading subjects across nodes](../subcommands/#spreading-subjects-across-nodes).
 
 ## A note on scratch expiry
 

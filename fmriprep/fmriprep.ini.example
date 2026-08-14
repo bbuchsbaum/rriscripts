@@ -37,6 +37,8 @@ runtime = singularity
 # templateflow_home = /project/def-piname/shared/opt/templateflow
 
 # ── Resources ──────────────────────────────────────────────────────────
+# These limits apply to each independent fMRIPrep process (one subject), not
+# to the whole Slurm array task.
 nprocs       = 8
 omp_threads  = 4
 mem_mb       = 32000                  # also accepts 32G, 2T
@@ -61,6 +63,27 @@ time      = 24:00:00
 job_name  = fmriprep
 # email     = user@university.ca
 # mail_type = END,FAIL
+
+# Subject scheduling uses two independent counts:
+#   subjects_per_job — subjects assigned to one array task
+#   parallel_subjects — independent fMRIPrep processes active inside that task
+# By default both are 1. If subjects_per_job is set but parallel_subjects is
+# omitted, all assigned subjects run concurrently.
+# subjects_per_job = 4
+# parallel_subjects = 2
+
+# Optional total task-allocation overrides. When omitted, the launcher uses
+# nprocs * parallel_subjects and mem_mb * parallel_subjects.
+# cpus_per_task = 16
+# mem = 64G
+
+# Cap active array tasks with Slurm's %K syntax. This is a maximum, not a
+# guarantee that K tasks start together.
+# array_concurrency = 4
+
+# Request an unshared physical node for each array task. Cluster or partition
+# policy can override this request, and exclusive tasks still need not co-start.
+# exclusive = true
 
 # Override log directory (use scratch on Trillium / Compute Canada)
 # log_dir = /scratch/$USER/fmriprep_logs

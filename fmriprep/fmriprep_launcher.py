@@ -32,7 +32,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from fmriprep_backend import (
     BuildConfig,
@@ -61,6 +61,34 @@ from fmriprep_shared import (
 
 
 # ---------------------------- Argparse CLI ----------------------------
+
+
+def positive_int(value: str) -> int:
+    """Argparse type for counts that must be at least one."""
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}")
+    return parsed
+
+
+def resolve_parallel_subjects(
+    subjects_per_job: int, parallel_subjects: Optional[int]
+) -> int:
+    """Return the within-task concurrency and reject impossible plans."""
+    if subjects_per_job < 1:
+        raise SystemExit("--subjects-per-job must be a positive integer")
+    resolved = subjects_per_job if parallel_subjects is None else parallel_subjects
+    if resolved < 1:
+        raise SystemExit("--parallel-subjects must be a positive integer")
+    if resolved > subjects_per_job:
+        raise SystemExit(
+            "--parallel-subjects cannot exceed --subjects-per-job: "
+            f"got {resolved} > {subjects_per_job}"
+        )
+    return resolved
 
 
 def add_common_args(p: argparse.ArgumentParser, config: Dict[str, str] = None):
@@ -151,7 +179,9 @@ def add_common_args(p: argparse.ArgumentParser, config: Dict[str, str] = None):
         type=int,
         default=int(config["nprocs"]) if "nprocs" in config else None,
         help=help_with_default(
-            "--nprocs for fMRIPrep", "nprocs", "auto-detect from system/Slurm"
+            "Per-subject --nprocs passed to each independent fMRIPrep process",
+            "nprocs",
+            "auto-detect from system/Slurm",
         ),
     )
     p.add_argument(
@@ -176,7 +206,8 @@ def add_common_args(p: argparse.ArgumentParser, config: Dict[str, str] = None):
         type=parse_memory_to_mb,
         default=default_mem,
         help=help_with_default(
-            "--mem-mb (supports units: 32G, 760000M)",
+            "Per-subject --mem-mb passed to each independent fMRIPrep process "
+            "(supports units: 32G, 760000M)",
             "mem_mb",
             "about 90 percent of available",
         ),
@@ -343,6 +374,7 @@ def _build_user_config():
         "# templateflow_home = /project/def-piname/shared/opt/templateflow",
         "",
         "# ── Resources (sensible defaults for most clusters) ──",
+        "# Per-subject limits passed to each independent fMRIPrep process",
         "nprocs = 8",
         "omp_threads = 4",
         "mem_mb = 32000",
@@ -360,6 +392,10 @@ def _build_user_config():
         "# account = def-piname",
         "# email = user@university.ca",
         "# mail_type = END,FAIL",
+        "# subjects_per_job = 1    # subjects assigned to each array task",
+        "# parallel_subjects = 1   # fMRIPrep processes active inside each task",
+        "# array_concurrency = 4   # maximum active array tasks, not a start guarantee",
+        "# exclusive = true        # request an unshared node for each task",
         "# no_mem = true  # For clusters that allocate whole nodes (e.g. Trillium)",
         "",
     ]
@@ -422,6 +458,7 @@ def _build_project_config(target_dir, global_cfg):
     lines += [
         "",
         "# ── Resources ──",
+        "# Per-subject limits passed to each independent fMRIPrep process",
         f"nprocs = {val('nprocs', '8')}",
         f"omp_threads = {val('omp_threads', '4')}",
         f"mem_mb = {val('mem_mb', '32000')}",
@@ -461,6 +498,10 @@ def _build_project_config(target_dir, global_cfg):
     lines += [
         "# email = user@university.ca",
         "# mail_type = END,FAIL",
+        f"# subjects_per_job = {val('slurm_subjects_per_job', '1')}",
+        f"# parallel_subjects = {val('slurm_parallel_subjects', '1')}",
+        "# array_concurrency = 4",
+        "# exclusive = true",
         "# no_mem = true  # For clusters that allocate whole nodes (e.g. Trillium)",
         "",
     ]
@@ -640,22 +681,41 @@ def cmd_slurm_array(args):
     out = args.out.expanduser().resolve()
     work = resolve_work_dir(args.work, getattr(args, "_configured_work", None))
 
-    # Handle subject batching
-    subjects_per_job = max(1, args.subjects_per_job)
+    subjects_per_job = args.subjects_per_job
+    parallel_subjects = resolve_parallel_subjects(
+        subjects_per_job, args.parallel_subjects
+    )
+    automatic_cpus_per_task = nprocs * parallel_subjects
+    automatic_mem_per_task = mem_mb * parallel_subjects
 
-    # Adjust resources if batching multiple subjects
-    # Since we run subjects in parallel with xargs, we need total_resources = per_subject × num_subjects
-    if subjects_per_job > 1:
-        # Simple multiplication: each subject needs full resources
-        adjusted_nprocs = nprocs * subjects_per_job
-        adjusted_mem = mem_mb * subjects_per_job
-
-        print(f"Batching {subjects_per_job} subjects per job")
-        print(f"Total job resources: {adjusted_nprocs} CPUs, {adjusted_mem} MB memory")
-        print(f"  ({nprocs} CPUs, {mem_mb} MB per subject)")
-    else:
-        adjusted_mem = mem_mb
-        adjusted_nprocs = nprocs
+    if (
+        subjects_per_job > 1
+        or parallel_subjects > 1
+        or args.array_concurrency is not None
+        or args.exclusive
+    ):
+        print(f"Subjects assigned to each array task: {subjects_per_job}")
+        print(f"Subjects run concurrently in each task: {parallel_subjects}")
+        if args.array_concurrency is not None:
+            print(f"Maximum active array tasks: {args.array_concurrency}")
+        else:
+            print("Maximum active array tasks: no launcher-imposed cap")
+        print(
+            "Node placement: request one unshared node per task"
+            if args.exclusive
+            else "Node placement: array tasks may share physical nodes"
+        )
+        print(
+            "Default task resource calculation (unless overridden): "
+            f"{automatic_cpus_per_task} CPUs, {automatic_mem_per_task} MB memory"
+        )
+        if args.cpus_per_task is not None:
+            print(f"Explicit task CPU allocation: {args.cpus_per_task}")
+        if args.no_mem or (args.mem and args.mem.lower() == "none"):
+            print("Task memory allocation: omit Slurm --mem")
+        elif args.mem:
+            print(f"Explicit task memory allocation: {args.mem}")
+        print(f"Per-subject fMRIPrep limits: {nprocs} CPUs, {mem_mb} MB memory")
 
     cfg = BuildConfig(
         bids=bids,
@@ -669,8 +729,11 @@ def cmd_slurm_array(args):
         if args.templateflow_home
         else None,
         omp_threads=omp_threads,
-        nprocs=adjusted_nprocs,
-        mem_mb=adjusted_mem,
+        # These are per-subject limits. Only the Slurm allocation is scaled by
+        # within-task concurrency; every child fMRIPrep process keeps these
+        # original values.
+        nprocs=nprocs,
+        mem_mb=mem_mb,
         extra=args.extra,
         skip_bids_validation=args.skip_bids_validation,
         output_spaces=args.output_spaces,
@@ -715,17 +778,16 @@ def cmd_slurm_array(args):
     elif args.mem and args.mem.lower() == "none":
         mem_spec = None
     else:
-        # adjusted_mem, not mem_mb: with --subjects-per-job N the task runs N
-        # subjects concurrently and fMRIPrep is told it has N x the memory, so
-        # the SLURM request has to scale too or the task is OOM-killed.
-        mem_spec = args.mem or mb_to_human(adjusted_mem)
+        mem_spec = args.mem or mb_to_human(automatic_mem_per_task)
+
+    cpus_per_task = args.cpus_per_task or automatic_cpus_per_task
 
     text = create_slurm_script(
         cfg=cfg,
         subject_file=subj_file,
         partition=args.partition,
         time=args.time,
-        cpus_per_task=args.cpus_per_task or adjusted_nprocs,
+        cpus_per_task=cpus_per_task,
         mem=mem_spec,
         account=args.account,
         email=args.email,
@@ -734,6 +796,9 @@ def cmd_slurm_array(args):
         status_dir=status_dir,
         module_singularity=args.module_singularity,
         job_name=args.job_name,
+        parallel_subjects=parallel_subjects,
+        array_concurrency=args.array_concurrency,
+        exclusive=args.exclusive,
     )
     script_path = out_dir / "fmriprep_array.sbatch"
     script_path.write_text(text)
@@ -747,7 +812,7 @@ def cmd_slurm_array(args):
         log_dir=log_dir,
         partition=args.partition,
         time=args.time,
-        cpus_per_task=args.cpus_per_task or adjusted_nprocs,
+        cpus_per_task=cpus_per_task,
         mem=mem_spec,
         account=args.account,
         email=args.email,
@@ -755,6 +820,11 @@ def cmd_slurm_array(args):
         job_name=args.job_name,
         module_singularity=args.module_singularity,
         subjects_per_job=subjects_per_job,
+        parallel_subjects=parallel_subjects,
+        array_concurrency=args.array_concurrency,
+        exclusive=args.exclusive,
+        cpus_per_task_auto=args.cpus_per_task is None,
+        mem_auto=not args.no_mem and args.mem is None,
     )
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
 
@@ -782,6 +852,40 @@ def cmd_rerun_failed(args):
     cfg = build_config_from_manifest(manifest, failed_subjects)
     slurm = manifest["slurm"]
     subjects_per_job = args.subjects_per_job or int(slurm.get("subjects_per_job", 1))
+    stored_parallel_subjects = int(
+        slurm.get("parallel_subjects", subjects_per_job)
+    )
+    parallel_subjects = resolve_parallel_subjects(
+        subjects_per_job,
+        args.parallel_subjects
+        if args.parallel_subjects is not None
+        else min(stored_parallel_subjects, subjects_per_job),
+    )
+    array_concurrency = (
+        args.array_concurrency
+        if args.array_concurrency is not None
+        else slurm.get("array_concurrency")
+    )
+    if array_concurrency is not None:
+        array_concurrency = int(array_concurrency)
+    exclusive = (
+        args.exclusive
+        if args.exclusive is not None
+        else bool(slurm.get("exclusive", False))
+    )
+
+    cpus_per_task_auto = bool(slurm.get("cpus_per_task_auto", False))
+    mem_auto = bool(slurm.get("mem_auto", False))
+    cpus_per_task = (
+        cfg.nprocs * parallel_subjects
+        if cpus_per_task_auto
+        else int(slurm["cpus_per_task"])
+    )
+    mem = (
+        mb_to_human(cfg.mem_mb * parallel_subjects)
+        if mem_auto
+        else slurm.get("mem")
+    )
     out_dir = (
         args.script_outdir.expanduser().resolve()
         if args.script_outdir
@@ -801,8 +905,8 @@ def cmd_rerun_failed(args):
         subject_file=subj_file,
         partition=slurm["partition"],
         time=slurm["time"],
-        cpus_per_task=int(slurm["cpus_per_task"]),
-        mem=slurm.get("mem"),
+        cpus_per_task=cpus_per_task,
+        mem=mem,
         account=slurm.get("account"),
         email=slurm.get("email"),
         mail_type=slurm.get("mail_type"),
@@ -810,6 +914,9 @@ def cmd_rerun_failed(args):
         status_dir=rerun_status_dir,
         module_singularity=bool(slurm.get("module_singularity", False)),
         job_name=args.job_name or f'{slurm["job_name"]}_rerun',
+        parallel_subjects=parallel_subjects,
+        array_concurrency=array_concurrency,
+        exclusive=exclusive,
     )
     script_path = out_dir / "fmriprep_array.sbatch"
     script_path.write_text(text)
@@ -823,14 +930,19 @@ def cmd_rerun_failed(args):
         log_dir=log_dir,
         partition=slurm["partition"],
         time=slurm["time"],
-        cpus_per_task=int(slurm["cpus_per_task"]),
-        mem=slurm.get("mem"),
+        cpus_per_task=cpus_per_task,
+        mem=mem,
         account=slurm.get("account"),
         email=slurm.get("email"),
         mail_type=slurm.get("mail_type"),
         job_name=args.job_name or f'{slurm["job_name"]}_rerun',
         module_singularity=bool(slurm.get("module_singularity", False)),
         subjects_per_job=subjects_per_job,
+        parallel_subjects=parallel_subjects,
+        array_concurrency=array_concurrency,
+        exclusive=exclusive,
+        cpus_per_task_auto=cpus_per_task_auto,
+        mem_auto=mem_auto,
     )
     rerun_manifest_path = out_dir / "job_manifest.json"
     rerun_manifest_path.write_text(json.dumps(rerun_manifest, indent=2) + "\n")
@@ -1024,6 +1136,14 @@ def cmd_wizard_review(args, config):
         .startswith("true")
     )
     log_dir = config.get("slurm_log_dir", "")
+    subjects_per_job = int(config.get("slurm_subjects_per_job", "1"))
+    configured_parallel_subjects = config.get("slurm_parallel_subjects", "").strip()
+    parallel_subjects = resolve_parallel_subjects(
+        subjects_per_job,
+        int(configured_parallel_subjects) if configured_parallel_subjects else None,
+    )
+    array_concurrency = config.get("slurm_array_concurrency", "")
+    exclusive = config.get("slurm_exclusive", "false").lower() == "true"
 
     # --- Phase 2: Build mutable field table ---
     # (key, label, value, type, choices)
@@ -1061,7 +1181,7 @@ def cmd_wizard_review(args, config):
         ("fs_reconall", "FreeSurfer recon-all", str(fs_reconall).lower(), "bool", None),
         ("use_syn_sdc", "SyN SDC", str(use_syn_sdc).lower(), "bool", None),
         ("extra", "Extra flags", extra, "str", None),
-        # SLURM 17-24
+        # SLURM
         ("partition", "SLURM partition", partition, "str", None),
         ("time_limit", "SLURM walltime", time_limit, "str", None),
         ("account", "SLURM account", account, "str", None),
@@ -1070,6 +1190,10 @@ def cmd_wizard_review(args, config):
         ("mail_type", "Mail type", mail_type, "str", None),
         ("no_mem", "Omit SLURM --mem", str(no_mem).lower(), "bool", None),
         ("log_dir", "Log directory", log_dir, "dir", None),
+        ("subjects_per_job", "Subjects per array task", str(subjects_per_job), "int", None),
+        ("parallel_subjects", "Parallel subjects per task", str(parallel_subjects), "int", None),
+        ("array_concurrency", "Maximum active array tasks", array_concurrency, "str", None),
+        ("exclusive", "Request unshared nodes", str(exclusive).lower(), "bool", None),
     ]
 
     def fval(key):
@@ -1270,8 +1394,17 @@ def cmd_wizard_review(args, config):
         final_out.mkdir(parents=True, exist_ok=True)
         final_work.mkdir(parents=True, exist_ok=True)
 
+        subjects_per_job = int(fval("subjects_per_job"))
+        parallel_subjects = resolve_parallel_subjects(
+            subjects_per_job, int(fval("parallel_subjects"))
+        )
+        array_concurrency = (
+            int(fval("array_concurrency")) if fval("array_concurrency") else None
+        )
+        exclusive = fval("exclusive") == "true"
+
         subj_file = outdir / "subjects.txt"
-        write_subject_batches(subj_file, subjects)
+        write_subject_batches(subj_file, subjects, subjects_per_job)
 
         slurm_log = (
             Path(fval("log_dir")).expanduser() if fval("log_dir") else outdir / "logs"
@@ -1281,9 +1414,13 @@ def cmd_wizard_review(args, config):
         status_dir = outdir / "status"
         status_dir.mkdir(parents=True, exist_ok=True)
 
-        cpus_per_task = int(fval("nprocs"))
+        cpus_per_task = int(fval("nprocs")) * parallel_subjects
         omit_mem = fval("no_mem") == "true"
-        mem = None if omit_mem else mb_to_human(int(fval("mem_mb")))
+        mem = (
+            None
+            if omit_mem
+            else mb_to_human(int(fval("mem_mb")) * parallel_subjects)
+        )
         module_sing = fval("runtime") == "singularity"
 
         script_text = create_slurm_script(
@@ -1300,6 +1437,9 @@ def cmd_wizard_review(args, config):
             status_dir=status_dir,
             module_singularity=module_sing,
             job_name=fval("job_name"),
+            parallel_subjects=parallel_subjects,
+            array_concurrency=array_concurrency,
+            exclusive=exclusive,
         )
         script_path = outdir / "fmriprep_array.sbatch"
         script_path.write_text(script_text)
@@ -1320,7 +1460,12 @@ def cmd_wizard_review(args, config):
             mail_type=fval("mail_type") or None,
             job_name=fval("job_name"),
             module_singularity=module_sing,
-            subjects_per_job=1,
+            subjects_per_job=subjects_per_job,
+            parallel_subjects=parallel_subjects,
+            array_concurrency=array_concurrency,
+            exclusive=exclusive,
+            cpus_per_task_auto=True,
+            mem_auto=not omit_mem,
         )
         manifest_path = outdir / "job_manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
@@ -1491,6 +1636,18 @@ def cmd_wizard_quick(args, config):
     fs_reconall = config.get("fs_reconall", "true").lower() == "true"
     use_syn_sdc = config.get("use_syn_sdc", "false").lower() == "true"
     extra = config.get("extra", "")
+    subjects_per_job = int(config.get("slurm_subjects_per_job", "1"))
+    configured_parallel_subjects = config.get("slurm_parallel_subjects", "").strip()
+    parallel_subjects = resolve_parallel_subjects(
+        subjects_per_job,
+        int(configured_parallel_subjects) if configured_parallel_subjects else None,
+    )
+    array_concurrency = (
+        int(config["slurm_array_concurrency"])
+        if config.get("slurm_array_concurrency", "").strip()
+        else None
+    )
+    exclusive = config.get("slurm_exclusive", "false").lower() == "true"
 
     cfg = BuildConfig(
         bids=bids,
@@ -1532,13 +1689,15 @@ def cmd_wizard_quick(args, config):
         warn_if_bundle_not_compute_writable(outdir)
 
         subj_file = outdir / "subjects.txt"
-        write_subject_batches(subj_file, selected_subjects)
+        write_subject_batches(subj_file, selected_subjects, subjects_per_job)
 
         partition = config.get(
             "slurm_partition", os.environ.get("SLURM_JOB_PARTITION", "compute")
         )
         time = config.get("slurm_time", "24:00:00")
-        cpus_per_task = int(config.get("slurm_cpus_per_task", str(nprocs)))
+        cpus_per_task = int(
+            config.get("slurm_cpus_per_task", str(nprocs * parallel_subjects))
+        )
         account = config.get("slurm_account") or None
         email = config.get("slurm_email") or None
         mail_type = config.get("slurm_mail_type") or None
@@ -1547,7 +1706,11 @@ def cmd_wizard_quick(args, config):
             config.get("slurm_no_mem", config.get("no_mem", "false")).lower() == "true"
         )
         log_dir = Path(config.get("slurm_log_dir", str(outdir / "logs"))).expanduser()
-        mem = None if no_mem else config.get("slurm_mem", mb_to_human(mem_mb))
+        mem = (
+            None
+            if no_mem
+            else config.get("slurm_mem", mb_to_human(mem_mb * parallel_subjects))
+        )
         module_sing = runtime == "singularity"
 
         status_dir = outdir / "status"
@@ -1567,6 +1730,9 @@ def cmd_wizard_quick(args, config):
             status_dir=status_dir,
             module_singularity=module_sing,
             job_name=job_name,
+            parallel_subjects=parallel_subjects,
+            array_concurrency=array_concurrency,
+            exclusive=exclusive,
         )
         script_path = outdir / "fmriprep_array.sbatch"
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -1760,15 +1926,19 @@ Environment variables: FMRIPREP_SIF_DIR, FS_LICENSE, TEMPLATEFLOW_HOME
     )
     p_slurm.add_argument(
         "--cpus-per-task",
-        type=int,
+        type=positive_int,
         default=int(config["slurm_cpus_per_task"])
         if config.get("slurm_cpus_per_task", "").strip()
         else None,
+        help="Total CPUs requested for each Slurm array task. Default: "
+        "nprocs multiplied by parallel-subjects.",
     )
     p_slurm.add_argument(
         "--mem",
         default=config.get("slurm_mem"),
-        help="Slurm memory request (e.g. 32G). Default: based on mem-mb. Use 'none' to omit --mem",
+        help="Total memory requested for each Slurm array task (e.g. 32G). "
+        "Default: mem-mb multiplied by parallel-subjects. Use 'none' to "
+        "omit --mem.",
     )
     p_slurm.add_argument("--account", default=config.get("slurm_account"))
     p_slurm.add_argument("--email", default=config.get("slurm_email"))
@@ -1795,10 +1965,38 @@ Environment variables: FMRIPREP_SIF_DIR, FS_LICENSE, TEMPLATEFLOW_HOME
     )
     p_slurm.add_argument(
         "--subjects-per-job",
-        type=int,
-        default=1,
-        help="Number of subjects to process per job (default: 1). "
-        "Values >1 batch multiple subjects together, reducing total jobs but requiring more resources per job.",
+        type=positive_int,
+        default=int(config.get("slurm_subjects_per_job", "1")),
+        help="Number of subjects assigned to each Slurm array task (default: 1).",
+    )
+    p_slurm.add_argument(
+        "--parallel-subjects",
+        type=positive_int,
+        default=(
+            int(config["slurm_parallel_subjects"])
+            if config.get("slurm_parallel_subjects", "").strip()
+            else None
+        ),
+        help="Maximum independent fMRIPrep processes run concurrently inside "
+        "each array task. Default: subjects-per-job.",
+    )
+    p_slurm.add_argument(
+        "--array-concurrency",
+        type=positive_int,
+        default=(
+            int(config["slurm_array_concurrency"])
+            if config.get("slurm_array_concurrency", "").strip()
+            else None
+        ),
+        help="Maximum number of array tasks Slurm may run concurrently. Adds "
+        "the %%K suffix to --array; it does not guarantee K tasks will start.",
+    )
+    p_slurm.add_argument(
+        "--exclusive",
+        action=argparse.BooleanOptionalAction,
+        default=config.get("slurm_exclusive", "false").lower() == "true",
+        help="Request an unshared node for each array task. Site or partition "
+        "policy may override this request.",
     )
     p_slurm.set_defaults(func=cmd_slurm_array)
 
@@ -1824,9 +2022,27 @@ Environment variables: FMRIPREP_SIF_DIR, FS_LICENSE, TEMPLATEFLOW_HOME
     )
     p_rerun.add_argument(
         "--subjects-per-job",
-        type=int,
+        type=positive_int,
         default=None,
-        help="Override batching for the rerun bundle",
+        help="Override the number of failed subjects assigned to each array task",
+    )
+    p_rerun.add_argument(
+        "--parallel-subjects",
+        type=positive_int,
+        default=None,
+        help="Override within-task subject concurrency for the rerun bundle",
+    )
+    p_rerun.add_argument(
+        "--array-concurrency",
+        type=positive_int,
+        default=None,
+        help="Override the maximum number of concurrent rerun array tasks",
+    )
+    p_rerun.add_argument(
+        "--exclusive",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override exclusive-node scheduling stored in the manifest",
     )
     p_rerun.add_argument(
         "--job-name", default=None, help="Override the rerun Slurm job name"
