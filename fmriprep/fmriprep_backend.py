@@ -43,12 +43,10 @@ def split_extra_args(extra: str) -> List[str]:
     return shlex.split(extra)
 
 
-def build_base_cli(cfg: BuildConfig, subjects: List[str]) -> List[str]:
-    labels = [s.replace("sub-", "") for s in subjects]
+def build_common_cli(cfg: BuildConfig) -> List[str]:
+    """Build the subject-independent fMRIPrep argument vector."""
     base_cli = [
         "participant",
-        "--participant-label",
-        *labels,
         "--nprocs",
         str(cfg.nprocs),
         "--omp-nthreads",
@@ -74,6 +72,17 @@ def build_base_cli(cfg: BuildConfig, subjects: List[str]) -> List[str]:
         base_cli += ["--use-syn-sdc"]
     base_cli += split_extra_args(cfg.extra)
     return base_cli
+
+
+def build_base_cli(cfg: BuildConfig, subjects: List[str]) -> List[str]:
+    labels = [s.replace("sub-", "") for s in subjects]
+    common_cli = build_common_cli(cfg)
+    return [
+        common_cli[0],
+        "--participant-label",
+        *labels,
+        *common_cli[1:],
+    ]
 
 
 def preflight_check(cfg: BuildConfig) -> List[str]:
@@ -226,18 +235,15 @@ OMP_THREADS="{omp_threads}"
 NPROCS="{nprocs}"
 MEM_MB="{mem_mb}"
 PARALLEL_SUBJECTS="{parallel_subjects}"
-EXTRA_FLAGS="{extra_flags}"
-SKIP_BIDS_VAL="{skip_bids_val}"
-OUTPUT_SPACES="{output_spaces}"
-USE_AROMA="{use_aroma}"
-CIFTI="{cifti}"
-FS_RECONALL="{fs_reconall}"
-USE_SYN_SDC="{use_syn_sdc}"
 BIND_TEMPLATEFLOW="{bind_templateflow}"
-TEMPLATEFLOW_FALLBACK="{templateflow_home}"
+TEMPLATEFLOW_HOME_RESOLVED={templateflow_home}
 
-mapfile -t SUBJECT_LINES < <(grep -v '^#' "$SUBJECT_LIST_FILE" | sed '/^$/d')
-SUBJECT_LINE="${{SUBJECT_LINES[$SLURM_ARRAY_TASK_ID]}}"
+SUBJECT_LINE=$(awk -v target="$((SLURM_ARRAY_TASK_ID + 1))" '
+  NF && $0 !~ /^#/ {{
+    seen++
+    if (seen == target) {{ print; exit }}
+  }}
+' "$SUBJECT_LIST_FILE")
 if [[ -z "$SUBJECT_LINE" ]]; then
   echo "No subject(s) for index $SLURM_ARRAY_TASK_ID"; exit 1
 fi
@@ -252,33 +258,13 @@ done
 
 mkdir -p "$OUT_DIR" "$WORK_DIR" "{log_dir}" "$STATUS_DIR"
 
-CLI_BASE=(participant --nprocs "$NPROCS" --omp-nthreads "$OMP_THREADS" --mem-mb "$MEM_MB" --notrack)
-
-if [[ "$SKIP_BIDS_VAL" == "1" ]]; then
-  CLI_BASE+=(--skip-bids-validation)
-fi
-if [[ -n "$OUTPUT_SPACES" ]]; then
-  CLI_BASE+=(--output-spaces $OUTPUT_SPACES)
-fi
-if [[ "$USE_AROMA" == "1" ]]; then
-  CLI_BASE+=(--use-aroma)
-fi
-if [[ "$CIFTI" == "1" ]]; then
-  CLI_BASE+=(--cifti-output 91k)
-fi
-if [[ "$FS_RECONALL" == "0" ]]; then
-  CLI_BASE+=(--fs-no-reconall)
-fi
-if [[ "$USE_SYN_SDC" == "1" ]]; then
-  CLI_BASE+=(--use-syn-sdc)
-fi
-if [[ -n "$EXTRA_FLAGS" ]]; then
-  read -ra _EXTRA <<< "$EXTRA_FLAGS"
-  CLI_BASE+=("${{_EXTRA[@]}}")
-fi
+load_cli_base() {{
+  CLI_BASE=({cli_base})
+}}
+export -f load_cli_base
 
 if [[ "$BIND_TEMPLATEFLOW" == "1" ]]; then
-  TEMPLATEFLOW_HOST="${{TEMPLATEFLOW_HOME:-$TEMPLATEFLOW_FALLBACK}}"
+  TEMPLATEFLOW_HOST="$TEMPLATEFLOW_HOME_RESOLVED"
   mkdir -p "$TEMPLATEFLOW_HOST"
   echo "TemplateFlow directory: $TEMPLATEFLOW_HOST"
 else
@@ -309,6 +295,8 @@ if [[ "$RUNTIME" == "singularity" ]]; then
     local SUBJECT_ID="${{1#sub-}}"
     local SUBJECT_WORK_DIR="${{WORK_DIR}}/sub-${{SUBJECT_ID}}"
     local -a bind_args
+    local -a CLI_BASE
+    load_cli_base
 
     echo "Starting fMRIPrep for sub-${{SUBJECT_ID}}..."
     rm -f "$STATUS_DIR/sub-${{SUBJECT_ID}}.ok" "$STATUS_DIR/sub-${{SUBJECT_ID}}.failed"
@@ -328,7 +316,7 @@ if [[ "$RUNTIME" == "singularity" ]]; then
       --pwd /work \
       "${{bind_args[@]}}" \
       "$CONTAINER" \
-      /data /out ${{CLI_BASE_STR}} --participant-label "${{SUBJECT_ID}}" --work-dir /work --fs-license-file /opt/freesurfer/license.txt; then
+      /data /out "${{CLI_BASE[@]}}" --participant-label "${{SUBJECT_ID}}" --work-dir /work --fs-license-file /opt/freesurfer/license.txt; then
       rm -f "$STATUS_DIR/sub-${{SUBJECT_ID}}.running"
       : > "$STATUS_DIR/sub-${{SUBJECT_ID}}.ok"
     else
@@ -338,10 +326,8 @@ if [[ "$RUNTIME" == "singularity" ]]; then
     fi
   }}
 
-  export -f run_subject
+  export -f run_subject load_cli_base
   export RT_BIN BIDS_DIR OUT_DIR WORK_DIR FS_LICENSE TEMPLATEFLOW_HOST CONTAINER OMP_THREADS BIND_TEMPLATEFLOW STATUS_DIR
-  CLI_BASE_STR=$(printf '%q ' "${{CLI_BASE[@]}}")
-  export CLI_BASE_STR
 
   if [[ $NUM_SUBJECTS -gt 1 ]]; then
     printf '%s\n' "${{SUBJECTS[@]}}" | xargs -P "$PARALLEL_SUBJECTS" -I {{}} bash -c 'run_subject "$@"' _ {{}}
@@ -353,6 +339,8 @@ elif [[ "$RUNTIME" == "fmriprep-docker" ]]; then
   run_subject_wrapper() {{
     local SUBJECT_ID="${{1#sub-}}"
     local SUBJECT_WORK_DIR="${{WORK_DIR}}/sub-${{SUBJECT_ID}}"
+    local -a CLI_BASE
+    load_cli_base
 
     echo "Starting fMRIPrep for sub-${{SUBJECT_ID}} with fmriprep-docker..."
     rm -f "$STATUS_DIR/sub-${{SUBJECT_ID}}.ok" "$STATUS_DIR/sub-${{SUBJECT_ID}}.failed"
@@ -373,7 +361,7 @@ elif [[ "$RUNTIME" == "fmriprep-docker" ]]; then
     fi
   }}
 
-  export -f run_subject_wrapper
+  export -f run_subject_wrapper load_cli_base
   export BIDS_DIR OUT_DIR WORK_DIR FS_LICENSE TEMPLATEFLOW_HOST BIND_TEMPLATEFLOW STATUS_DIR
 
   if [[ $NUM_SUBJECTS -gt 1 ]]; then
@@ -387,6 +375,8 @@ elif [[ "$RUNTIME" == "docker" ]]; then
     local SUBJECT_ID="${{1#sub-}}"
     local SUBJECT_WORK_DIR="${{WORK_DIR}}/sub-${{SUBJECT_ID}}"
     local -a docker_args
+    local -a CLI_BASE
+    load_cli_base
 
     echo "Starting fMRIPrep for sub-${{SUBJECT_ID}} with Docker..."
     rm -f "$STATUS_DIR/sub-${{SUBJECT_ID}}.ok" "$STATUS_DIR/sub-${{SUBJECT_ID}}.failed"
@@ -408,7 +398,7 @@ elif [[ "$RUNTIME" == "docker" ]]; then
     if docker run --rm \
       "${{docker_args[@]}}" \
       "$CONTAINER" \
-      /data /out ${{CLI_BASE_STR}} --participant-label "${{SUBJECT_ID}}" --fs-license-file /opt/freesurfer/license.txt --work-dir /work; then
+      /data /out "${{CLI_BASE[@]}}" --participant-label "${{SUBJECT_ID}}" --fs-license-file /opt/freesurfer/license.txt --work-dir /work; then
       rm -f "$STATUS_DIR/sub-${{SUBJECT_ID}}.running"
       : > "$STATUS_DIR/sub-${{SUBJECT_ID}}.ok"
     else
@@ -418,10 +408,8 @@ elif [[ "$RUNTIME" == "docker" ]]; then
     fi
   }}
 
-  export -f run_subject_docker
+  export -f run_subject_docker load_cli_base
   export BIDS_DIR OUT_DIR WORK_DIR FS_LICENSE CONTAINER OMP_THREADS TEMPLATEFLOW_HOST BIND_TEMPLATEFLOW STATUS_DIR
-  CLI_BASE_STR=$(printf '%q ' "${{CLI_BASE[@]}}")
-  export CLI_BASE_STR
 
   if [[ $NUM_SUBJECTS -gt 1 ]]; then
     printf '%s\n' "${{SUBJECTS[@]}}" | xargs -P "$PARALLEL_SUBJECTS" -I {{}} bash -c 'run_subject_docker "$@"' _ {{}}
@@ -477,7 +465,8 @@ def create_slurm_script(
     array_spec = f"0-{n - 1}"
     if array_concurrency is not None:
         array_spec += f"%{array_concurrency}"
-    templateflow_path = resolve_templateflow_home(cfg) or ""
+    templateflow_path = shlex.quote(resolve_templateflow_home(cfg) or "")
+    cli_base = " ".join(shlex.quote(arg) for arg in build_common_cli(cfg))
 
     return SLURM_TEMPLATE.format(
         job_name=job_name,
@@ -503,13 +492,7 @@ def create_slurm_script(
         nprocs=cfg.nprocs,
         mem_mb=cfg.mem_mb,
         parallel_subjects=parallel_subjects,
-        extra_flags=cfg.extra,
-        skip_bids_val="1" if cfg.skip_bids_validation else "0",
-        output_spaces=cfg.output_spaces or "",
-        use_aroma="1" if cfg.use_aroma else "0",
-        cifti="1" if cfg.cifti_output else "0",
-        fs_reconall="1" if cfg.fs_reconall else "0",
-        use_syn_sdc="1" if cfg.use_syn_sdc else "0",
+        cli_base=cli_base,
         bind_templateflow="1" if cfg.bind_templateflow else "0",
         templateflow_home=templateflow_path,
     )

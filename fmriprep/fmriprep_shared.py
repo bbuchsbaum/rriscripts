@@ -107,7 +107,11 @@ def warn_if_bundle_not_compute_writable(script_outdir: Path) -> None:
     )
 
 
-def load_config(config_paths: List[str] | None = None) -> Dict[str, str]:
+def load_config(
+    config_paths: List[str] | None = None,
+    *,
+    include_default_paths: bool = True,
+) -> Dict[str, str]:
     """
     Load configuration from files. Checks in order:
     1. System config: /etc/fmriprep/config.ini
@@ -115,17 +119,20 @@ def load_config(config_paths: List[str] | None = None) -> Dict[str, str]:
     3. Local config: ./fmriprep.ini
     4. Custom path if provided
 
-    Later configs override earlier ones.
+    Later configs override earlier ones. When ``include_default_paths`` is
+    false, only explicitly supplied ``config_paths`` are read.
     """
     if config_paths is None:
         config_paths = []
 
-    default_paths = [
-        "/etc/fmriprep/config.ini",
-        Path.home() / ".config" / "fmriprep" / "config.ini",
-        Path.home() / ".fmriprep.ini",
-        Path.cwd() / "fmriprep.ini",
-    ]
+    default_paths = []
+    if include_default_paths:
+        default_paths = [
+            "/etc/fmriprep/config.ini",
+            Path.home() / ".config" / "fmriprep" / "config.ini",
+            Path.home() / ".fmriprep.ini",
+            Path.cwd() / "fmriprep.ini",
+        ]
 
     config = configparser.ConfigParser(inline_comment_prefixes=("#",))
     defaults: Dict[str, str] = {}

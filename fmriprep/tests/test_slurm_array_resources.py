@@ -63,12 +63,29 @@ class SlurmArrayResourceTests(unittest.TestCase):
     def tearDown(self):
         self.tmpdir.cleanup()
 
-    def run_launcher(self, *extra, cwd=None):
+    def launcher_env(self):
+        env = os.environ.copy()
+        isolated_home = self.root / "isolated-home"
+        env.update(
+            {
+                "SCRATCH": str(self.root),
+                "HOME": str(isolated_home),
+                "XDG_CONFIG_HOME": str(isolated_home / ".config"),
+            }
+        )
+        for key in ("FS_LICENSE", "TEMPLATEFLOW_HOME", "FMRIPREP_SIF_DIR"):
+            env.pop(key, None)
+        return env
+
+    def run_launcher(self, *extra, cwd=None, env=None):
         outdir = self.root / f"bundle_{len(list(self.root.glob('bundle_*')))}"
         proc = subprocess.run(
             [
                 sys.executable,
                 str(LAUNCHER),
+                "--no-default-config",
+                "--config",
+                str(self.config_path),
                 "slurm-array",
                 "--subjects",
                 "all",
@@ -79,7 +96,7 @@ class SlurmArrayResourceTests(unittest.TestCase):
             cwd=str(cwd or self.root),
             capture_output=True,
             text=True,
-            env={**os.environ, "SCRATCH": str(self.root)},
+            env=self.launcher_env() if env is None else env,
         )
         return outdir, proc
 
@@ -125,6 +142,25 @@ class SlurmArrayResourceTests(unittest.TestCase):
     def test_explicit_mem_flag_still_wins(self):
         text = self.run_slurm_array("--subjects-per-job", "2", "--mem", "64G")
         self.assertEqual(sbatch_directive(text, "mem"), "64G")
+
+    def test_explicit_config_ignores_hostile_user_config(self):
+        hostile_home = self.root / "hostile-home"
+        hostile_config = hostile_home / ".config" / "fmriprep" / "config.ini"
+        hostile_config.parent.mkdir(parents=True)
+        leaked_logs = self.root / "leaked-logs"
+        hostile_config.write_text(
+            f"[slurm]\nno_mem = true\nlog_dir = {leaked_logs}\n"
+        )
+        env = self.launcher_env()
+        env["HOME"] = str(hostile_home)
+        env["XDG_CONFIG_HOME"] = str(hostile_home / ".config")
+
+        outdir, proc = self.run_launcher(env=env)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        text = (outdir / "fmriprep_array.sbatch").read_text()
+        self.assertEqual(sbatch_directive(text, "mem"), "8G")
+        self.assertFalse(leaked_logs.exists())
 
     def test_relative_work_resolves_under_configured_base(self):
         """A bare --work names a subdirectory of the configured work dir."""
@@ -228,6 +264,7 @@ class SlurmArrayResourceTests(unittest.TestCase):
             [
                 sys.executable,
                 str(LAUNCHER),
+                "--no-default-config",
                 "rerun-failed",
                 "--manifest",
                 str(manifest_path),
@@ -244,6 +281,7 @@ class SlurmArrayResourceTests(unittest.TestCase):
             cwd=str(self.root),
             capture_output=True,
             text=True,
+            env=self.launcher_env(),
         )
         self.assertEqual(rerun.returncode, 0, rerun.stderr)
 

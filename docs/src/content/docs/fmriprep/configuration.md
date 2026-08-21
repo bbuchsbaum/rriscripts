@@ -121,3 +121,12 @@ comments.
 
 Config keys take precedence over the environment fallbacks, and they are easier
 to share in project run notes.
+
+For a fully isolated invocation that reads exactly one configuration file, use
+the global options before the subcommand:
+
+```bash
+fmriprep_launcher.py --no-default-config --config /path/to/fmriprep.ini slurm-array
+```
+
+This skips the system, user, legacy user, and local configuration search paths.

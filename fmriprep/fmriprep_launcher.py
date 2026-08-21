@@ -528,7 +528,10 @@ def cmd_init(args):
             print(f"Already exists: {outfile}", file=sys.stderr)
             print("Use --force to overwrite.", file=sys.stderr)
             sys.exit(1)
-        global_cfg = load_config()
+        global_cfg = load_config(
+            [args.config] if args.config else [],
+            include_default_paths=not args.no_default_config,
+        )
         target_dir.mkdir(parents=True, exist_ok=True)
         outfile.write_text("\n".join(_build_project_config(target_dir, global_cfg)))
         print(f"Wrote {outfile}")
@@ -546,7 +549,7 @@ def cmd_init(args):
         print("Edit the file, then run: fmriprep_launcher.py wizard --quick")
 
 
-def cmd_probe(_args):
+def cmd_probe(args):
     print("=== Probe ===")
 
     # --- Config files ---
@@ -556,7 +559,15 @@ def cmd_probe(_args):
         Path.home() / ".fmriprep.ini",
         Path.cwd() / "fmriprep.ini",
     ]
-    found_configs = [p for p in config_search_paths if p.exists()]
+    found_configs = (
+        [p for p in config_search_paths if p.exists()]
+        if not args.no_default_config
+        else []
+    )
+    if args.config:
+        explicit_config = Path(args.config).expanduser()
+        if explicit_config.exists():
+            found_configs.append(explicit_config)
     if found_configs:
         print("Config files (in load order):")
         for p in found_configs:
@@ -564,7 +575,10 @@ def cmd_probe(_args):
     else:
         print("No config files found")
 
-    cfg = load_config()
+    cfg = load_config(
+        [args.config] if args.config else [],
+        include_default_paths=not args.no_default_config,
+    )
     if cfg:
         print("Effective config values:")
         for k, v in sorted(cfg.items()):
@@ -1746,7 +1760,8 @@ def cmd_wizard_quick(args, config):
 
 def cmd_wizard(args):
     config = load_config(
-        [args.config] if hasattr(args, "config") and args.config else []
+        [args.config] if hasattr(args, "config") and args.config else [],
+        include_default_paths=not args.no_default_config,
     )
     if getattr(args, "quick", False):
         return cmd_wizard_quick(args, config)
@@ -1846,10 +1861,16 @@ Environment variables: FMRIPREP_SIF_DIR, FS_LICENSE, TEMPLATEFLOW_HOME
     ap.add_argument(
         "--config", type=str, help="Path to additional config file (overrides defaults)"
     )
+    ap.add_argument(
+        "--no-default-config",
+        action="store_true",
+        help="Read only files passed with --config; skip system, user, and local configs",
+    )
 
     # Pre-scan sys.argv for --config so we can load defaults before building
     # subparsers. This avoids parse_known_args() which swallows --help.
     config_path = None
+    no_default_config = "--no-default-config" in sys.argv[1:]
     for i, arg in enumerate(sys.argv[1:], 1):
         if arg == "--config" and i + 1 < len(sys.argv):
             config_path = sys.argv[i + 1]
@@ -1859,7 +1880,10 @@ Environment variables: FMRIPREP_SIF_DIR, FS_LICENSE, TEMPLATEFLOW_HOME
             break
 
     # Load configuration defaults
-    config = load_config([config_path] if config_path else [])
+    config = load_config(
+        [config_path] if config_path else [],
+        include_default_paths=not no_default_config,
+    )
 
     # Now add subparsers
     sub = ap.add_subparsers(dest="cmd", required=True)

@@ -1,9 +1,11 @@
+import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
-
-import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -127,8 +129,169 @@ class FMRIPrepBackendTests(unittest.TestCase):
         self.assertIn('xargs -P "$PARALLEL_SUBJECTS"', script)
         self.assertIn('BIND_TEMPLATEFLOW="1"', script)
         self.assertIn('STATUS_DIR="' + str(status_dir) + '"', script)
-        self.assertIn('TEMPLATEFLOW_FALLBACK="' + str(self.templateflow) + '"', script)
+        self.assertIn('TEMPLATEFLOW_HOME_RESOLVED=' + str(self.templateflow), script)
+        self.assertIn('TEMPLATEFLOW_HOST="$TEMPLATEFLOW_HOME_RESOLVED"', script)
         self.assertIn('SUBJECT_LIST_FILE="' + str(subject_file) + '"', script)
+
+    def test_batched_runtime_preserves_cli_argv_and_templateflow_precedence(self):
+        stub_dir = self.root / "bin"
+        stub_dir.mkdir()
+        stub_source = f"""#!{sys.executable}
+import json
+import os
+import sys
+
+if os.path.basename(sys.argv[0]) == "apptainer" and sys.argv[1:] == ["--version"]:
+    print("apptainer version 1.0")
+    raise SystemExit(0)
+
+with open(os.environ["ARG_LOG"], "a") as stream:
+    stream.write(json.dumps({{
+        "argv": sys.argv[1:],
+        "templateflow_home": os.environ.get("TEMPLATEFLOW_HOME"),
+    }}) + "\\n")
+"""
+        for name in ("apptainer", "docker", "fmriprep-docker"):
+            stub = stub_dir / name
+            stub.write_text(stub_source)
+            stub.chmod(0o755)
+
+        configured_templateflow = self.root / "configured templateflow $cache"
+        configured_templateflow.mkdir()
+        extra = '--output-layout "bids derivative" --dummy-pattern "*.nii.gz"'
+        expected_common = [
+            "participant",
+            "--nprocs", "8",
+            "--omp-nthreads", "4",
+            "--mem-mb", "32000",
+            "--notrack",
+            "--skip-bids-validation",
+            "--output-spaces", "MNI152NLin2009cAsym:res-2", "T1w",
+            "--use-syn-sdc",
+            "--output-layout", "bids derivative",
+            "--dummy-pattern", "*.nii.gz",
+        ]
+
+        for runtime in ("singularity", "fmriprep-docker", "docker"):
+            with self.subTest(runtime=runtime):
+                runtime_dir = self.root / runtime
+                runtime_dir.mkdir()
+                subject_file = runtime_dir / "subjects.txt"
+                write_subject_batches(
+                    subject_file, ["sub-01", "sub-02"], subjects_per_job=2
+                )
+                status_dir = runtime_dir / "status"
+                log_dir = runtime_dir / "logs"
+                cfg = self.build_cfg(
+                    container_runtime=runtime,
+                    container=(
+                        "/containers/fmriprep.sif"
+                        if runtime == "singularity"
+                        else "nipreps/fmriprep:test"
+                    ),
+                    extra=extra,
+                    templateflow_home=configured_templateflow,
+                )
+                script = create_slurm_script(
+                    cfg=cfg,
+                    subject_file=subject_file,
+                    partition="compute",
+                    time="1:00:00",
+                    cpus_per_task=8,
+                    mem="32G",
+                    account=None,
+                    email=None,
+                    mail_type=None,
+                    log_dir=log_dir,
+                    status_dir=status_dir,
+                    module_singularity=False,
+                    parallel_subjects=1,
+                )
+                script_path = runtime_dir / "fmriprep_array.sbatch"
+                script_path.write_text(script)
+
+                arg_log = runtime_dir / "argv.jsonl"
+                stale_templateflow = runtime_dir / "stale-templateflow"
+                env = os.environ.copy()
+                env.update(
+                    {
+                        "ARG_LOG": str(arg_log),
+                        "PATH": str(stub_dir) + os.pathsep + env["PATH"],
+                        "SLURM_ARRAY_TASK_ID": "0",
+                        "TEMPLATEFLOW_HOME": str(stale_templateflow),
+                    }
+                )
+                proc = subprocess.run(
+                    ["bash", str(script_path)],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+
+                records = [json.loads(line) for line in arg_log.read_text().splitlines()]
+                self.assertEqual(len(records), 2)
+                for subject_id, record in zip(("01", "02"), records):
+                    argv = record["argv"]
+                    cli_start = argv.index("participant")
+                    if runtime == "singularity":
+                        expected_tail = expected_common + [
+                            "--participant-label", subject_id,
+                            "--work-dir", "/work",
+                            "--fs-license-file", "/opt/freesurfer/license.txt",
+                        ]
+                    elif runtime == "docker":
+                        expected_tail = expected_common + [
+                            "--participant-label", subject_id,
+                            "--fs-license-file", "/opt/freesurfer/license.txt",
+                            "--work-dir", "/work",
+                        ]
+                    else:
+                        expected_tail = expected_common + [
+                            "--participant-label", subject_id,
+                            "--work-dir", str(self.work / f"sub-{subject_id}"),
+                            "--fs-license-file", str(self.fs_license),
+                        ]
+                    self.assertEqual(argv[cli_start:], expected_tail)
+
+                    if runtime == "fmriprep-docker":
+                        self.assertEqual(
+                            record["templateflow_home"], str(configured_templateflow)
+                        )
+                    else:
+                        self.assertIn(
+                            f"{configured_templateflow}:/opt/templateflow", argv
+                        )
+                    self.assertNotIn(str(stale_templateflow), argv)
+
+    def test_slurm_script_reports_out_of_range_array_index(self):
+        subject_file = self.root / "subjects.txt"
+        write_subject_batches(subject_file, ["sub-01"])
+        script = create_slurm_script(
+            cfg=self.build_cfg(container_runtime="fmriprep-docker", container=""),
+            subject_file=subject_file,
+            partition="compute",
+            time="1:00:00",
+            cpus_per_task=8,
+            mem="32G",
+            account=None,
+            email=None,
+            mail_type=None,
+            log_dir=self.root / "logs",
+            status_dir=self.root / "status",
+            module_singularity=False,
+        )
+        script_path = self.root / "fmriprep_array.sbatch"
+        script_path.write_text(script)
+        proc = subprocess.run(
+            ["bash", str(script_path)],
+            env={**os.environ, "SLURM_ARRAY_TASK_ID": "9"},
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("No subject(s) for index 9", proc.stdout)
+        self.assertNotIn("unbound variable", proc.stderr)
 
     def test_resolve_subjects_arg_discovers_all(self):
         (self.bids / "sub-01").mkdir()
