@@ -162,6 +162,34 @@ class SlurmArrayResourceTests(unittest.TestCase):
         self.assertEqual(sbatch_directive(text, "mem"), "8G")
         self.assertFalse(leaked_logs.exists())
 
+    def test_warns_when_output_and_work_are_not_on_compute_writable_storage(self):
+        output = Path("/project/rrg-test/study/derivatives/fmriprep")
+        work = Path("/project/rrg-test/fmriprep-work")
+        self.config_path.write_text(
+            CONFIG.format(
+                bids=self.bids,
+                out=output,
+                work=work,
+                container=self.container,
+                license=self.license,
+            )
+        )
+
+        _, proc = self.run_launcher()
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn(f"Output dir {output} is not under $SCRATCH", proc.stderr)
+        self.assertIn(f"Work dir {work} is not under $SCRATCH", proc.stderr)
+        self.assertIn(f"--out {self.root / output.name}", proc.stderr)
+        self.assertIn(f"--work {self.root / work.name}", proc.stderr)
+
+    def test_compute_writable_output_and_work_do_not_warn(self):
+        _, proc = self.run_launcher()
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("Output dir", proc.stderr)
+        self.assertNotIn("Work dir", proc.stderr)
+
     def test_relative_work_resolves_under_configured_base(self):
         """A bare --work names a subdirectory of the configured work dir."""
         text = self.run_slurm_array("--work", "run2")

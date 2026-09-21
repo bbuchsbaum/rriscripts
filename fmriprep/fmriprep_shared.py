@@ -63,22 +63,30 @@ def resolve_work_dir(work: Path | str, configured_work: Optional[str] = None) ->
     return p.resolve()
 
 
-def warn_if_bundle_not_compute_writable(script_outdir: Path) -> None:
-    """Warn if script_outdir is unlikely to be writable from compute nodes.
+def warn_if_path_not_compute_writable(
+    path: Path,
+    *,
+    label: str,
+    writer: str,
+    option: str,
+    config_setting: str,
+) -> None:
+    """Warn when a compute-node-writable path is unlikely.
 
-    Runtime-only check (no actual fs probe — login and compute nodes have
-    different mounts). If $SCRATCH is set but the chosen bundle path is not
-    under $SCRATCH, $TMPDIR, or any /scratch* / /tmp prefix, print a one-line
-    warning to stderr.
+    This is deliberately a heuristic rather than an actual filesystem probe:
+    login and compute nodes may see different mounts. When $SCRATCH is set,
+    paths outside it, $TMPDIR, /scratch*, and /tmp are suspicious on clusters
+    such as Trillium, where /project is writable from login nodes but read-only
+    from compute nodes.
     """
     scratch = os.environ.get("SCRATCH")
     if not scratch:
         return
 
     try:
-        resolved = script_outdir.expanduser().resolve()
+        resolved = path.expanduser().resolve()
     except OSError:
-        resolved = script_outdir.expanduser()
+        resolved = path.expanduser()
 
     safe_roots: List[Path] = []
     for env_var in ("SCRATCH", "TMPDIR"):
@@ -97,13 +105,24 @@ def warn_if_bundle_not_compute_writable(script_outdir: Path) -> None:
 
     suggested = Path(scratch) / resolved.name
     print(
-        f"\n⚠ Bundle dir {resolved} is not under $SCRATCH or a /scratch path.\n"
-        f"  Status markers are written from compute nodes at runtime; if your\n"
+        f"\n⚠ {label} {resolved} is not under $SCRATCH or a /scratch path.\n"
+        f"  {writer} writes here from compute nodes at runtime; if your\n"
         f"  cluster mounts this path read-only on compute nodes (e.g. Trillium\n"
         f"  /project), the job will fail with 'Permission denied'.\n"
-        f"  Consider:  --script-outdir {suggested}\n"
-        f"  or in fmriprep.ini: [slurm] script_outdir = {suggested}\n",
+        f"  Consider:  {option} {suggested}\n"
+        f"  or in fmriprep.ini: {config_setting} = {suggested}\n",
         file=sys.stderr,
+    )
+
+
+def warn_if_bundle_not_compute_writable(script_outdir: Path) -> None:
+    """Warn if the runtime-mutated Slurm bundle is unlikely to be writable."""
+    warn_if_path_not_compute_writable(
+        script_outdir,
+        label="Bundle dir",
+        writer="Status markers",
+        option="--script-outdir",
+        config_setting="[slurm] script_outdir",
     )
 
 

@@ -57,6 +57,7 @@ from fmriprep_shared import (
     parse_memory_to_mb,
     resolve_work_dir,
     warn_if_bundle_not_compute_writable,
+    warn_if_path_not_compute_writable,
 )
 
 
@@ -761,6 +762,20 @@ def cmd_slurm_array(args):
         for e in errors:
             print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    warn_if_path_not_compute_writable(
+        cfg.out,
+        label="Output dir",
+        writer="fMRIPrep",
+        option="--out",
+        config_setting="[defaults] out",
+    )
+    warn_if_path_not_compute_writable(
+        cfg.work,
+        label="Work dir",
+        writer="fMRIPrep",
+        option="--work",
+        config_setting="[defaults] work",
+    )
     script_outdir = (
         args.script_outdir
         if args.script_outdir is not None
@@ -1405,6 +1420,20 @@ def cmd_wizard_review(args, config):
             outdir = default_script_outdir(final_bids)
         outdir.mkdir(parents=True, exist_ok=True)
         warn_if_bundle_not_compute_writable(outdir)
+        warn_if_path_not_compute_writable(
+            cfg.out,
+            label="Output dir",
+            writer="fMRIPrep",
+            option="--out",
+            config_setting="[defaults] out",
+        )
+        warn_if_path_not_compute_writable(
+            cfg.work,
+            label="Work dir",
+            writer="fMRIPrep",
+            option="--work",
+            config_setting="[defaults] work",
+        )
         final_out.mkdir(parents=True, exist_ok=True)
         final_work.mkdir(parents=True, exist_ok=True)
 
@@ -1701,6 +1730,20 @@ def cmd_wizard_quick(args, config):
             outdir = default_script_outdir(bids)
         outdir.mkdir(parents=True, exist_ok=True)
         warn_if_bundle_not_compute_writable(outdir)
+        warn_if_path_not_compute_writable(
+            cfg.out,
+            label="Output dir",
+            writer="fMRIPrep",
+            option="--out",
+            config_setting="[defaults] out",
+        )
+        warn_if_path_not_compute_writable(
+            cfg.work,
+            label="Work dir",
+            writer="fMRIPrep",
+            option="--work",
+            config_setting="[defaults] work",
+        )
 
         subj_file = outdir / "subjects.txt"
         write_subject_batches(subj_file, selected_subjects, subjects_per_job)

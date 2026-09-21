@@ -14,7 +14,10 @@ with `Permission denied` on `status/sub-XXX.running`.
 The launcher handles this automatically: if `$SCRATCH` is set, the default
 `script_outdir` is `$SCRATCH/<bids-basename>_fmriprep_job`. If you override it to
 a path that is not under `$SCRATCH` (or `/scratch*`, `/tmp`, `$TMPDIR`), the
-launcher prints a warning at generation time.
+launcher prints a warning at generation time. It applies the same heuristic to
+`out` and `work`, which fMRIPrep also writes from the compute node. This is a
+warning rather than a mount test: the submit host cannot reliably determine
+what a compute node can write.
 
 To set it explicitly:
 
@@ -27,7 +30,10 @@ Or pass `--script-outdir` to `slurm-array`.
 
 :::caution
 `out` and `work` should also be on scratch — both are written from compute nodes
-at runtime.
+at runtime. Stage completed derivatives back to project storage from a login
+node. If you reuse FreeSurfer results, also stage
+`<out>/sourcedata/freesurfer`; otherwise moving `out` to scratch makes
+fMRIPrep run `recon-all` again.
 :::
 
 ## Trillium (whole-node scheduling)
