@@ -785,16 +785,15 @@ class FMRIPrepAutocompleteTUI(App):
         if templateflow_home:
             cmd.extend(["--templateflow-home", templateflow_home])
         
-        if skip_bids:
-            cmd.append("--skip-bids-validation")
+        # Explicit both ways: the launcher's own default comes from the same config.
+        cmd.append("--skip-bids-validation" if skip_bids else "--no-skip-bids-validation")
         if output_spaces:
             cmd.extend(["--output-spaces", output_spaces])
         if use_aroma:
             cmd.append("--use-aroma")
         if cifti_output:
             cmd.append("--cifti-output")
-        if fs_reconall:
-            cmd.append("--fs-reconall")
+        cmd.append("--fs-reconall" if fs_reconall else "--no-fs-reconall")
         if use_syn_sdc:
             cmd.append("--use-syn-sdc")
         

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
-from fmriprep_shared import discover_subjects, which
+from fmriprep_shared import discover_subjects, run_cmd, which
 
 
 @dataclass
@@ -76,13 +76,9 @@ def build_common_cli(cfg: BuildConfig) -> List[str]:
 
 def build_base_cli(cfg: BuildConfig, subjects: List[str]) -> List[str]:
     labels = [s.replace("sub-", "") for s in subjects]
-    common_cli = build_common_cli(cfg)
-    return [
-        common_cli[0],
-        "--participant-label",
-        *labels,
-        *common_cli[1:],
-    ]
+    # Same position as the batch script, so a --participant-label hidden in
+    # `extra` resolves the same way in both.
+    return [*build_common_cli(cfg), "--participant-label", *labels]
 
 
 def preflight_check(cfg: BuildConfig) -> List[str]:
@@ -109,9 +105,55 @@ def resolve_templateflow_home(cfg: BuildConfig) -> Optional[str]:
     return os.environ.get("TEMPLATEFLOW_HOME", str(Path.home() / ".cache" / "templateflow"))
 
 
+def container_env_prefix(singularity_bin: str) -> str:
+    """Return the env-var prefix the container runtime honours.
+
+    Mirrors the batch script: ``singularity`` is often a symlink to Apptainer,
+    so ask the binary rather than trusting its name.
+    """
+    if Path(singularity_bin).name == "apptainer":
+        return "APPTAINERENV"
+    code, out, _ = run_cmd([singularity_bin, "--version"])
+    if code == 0 and "apptainer" in out.lower():
+        return "APPTAINERENV"
+    return "SINGULARITYENV"
+
+
+def subject_work_dir(cfg: BuildConfig, subjects: List[str]) -> Path:
+    """Work directory used for a run.
+
+    Batch jobs give every subject its own work directory so concurrent
+    subjects never share Nipype caches. A single-subject direct command uses
+    the same layout, so it reproduces what an array task runs.
+    """
+    if len(subjects) == 1:
+        return cfg.work / f"sub-{subjects[0].replace('sub-', '')}"
+    return cfg.work
+
+
+def build_runnable_lines(cfg: BuildConfig, subject: str) -> List[str]:
+    """Shell lines that run one subject the way an array task does.
+
+    The container binds and ``--home`` point into the per-subject work
+    directory, which the batch script creates first; so must a pasted command.
+    """
+    work = subject_work_dir(cfg, [subject])
+    dirs = [work] if cfg.container_runtime == "fmriprep-docker" else [
+        work / ".home", work / ".matplotlib", work / ".cache"
+    ]
+    return [
+        shlex.join(["mkdir", "-p", *(str(d) for d in dirs)]),
+        shlex.join(str(c) for c in build_fmriprep_command(cfg, subject)),
+    ]
+
+
 def build_fmriprep_command(cfg: BuildConfig, subjects: List[str] | str) -> List[str]:
     """
     Construct the full fMRIPrep command for one or more subjects.
+
+    For a single subject this is the command a Slurm array task runs:
+    the same binds, per-subject work directory, container home and
+    environment as the generated batch script.
     """
     if isinstance(subjects, str):
         subjects = [subjects]
@@ -123,26 +165,38 @@ def build_fmriprep_command(cfg: BuildConfig, subjects: List[str] | str) -> List[
     fs_license_in = "/opt/freesurfer/license.txt"
     templateflow_host = resolve_templateflow_home(cfg)
     templateflow_container = "/opt/templateflow"
+    work_host = subject_work_dir(cfg, subjects)
 
     if cfg.container_runtime == "singularity":
         singularity_bin = "apptainer" if which("apptainer") else "singularity"
+        env_prefix = container_env_prefix(singularity_bin)
+        env = []
+        if templateflow_host:
+            env.append(f"{env_prefix}_TEMPLATEFLOW_HOME={templateflow_container}")
+        env += [
+            f"{env_prefix}_MPLCONFIGDIR={work_dir_in}/.matplotlib",
+            f"{env_prefix}_NUMEXPR_MAX_THREADS={cfg.omp_threads}",
+        ]
         cmd = [
+            *env,
             singularity_bin,
             "run",
             "--cleanenv",
+            "--home",
+            f"{work_host}/.home",
+            "--pwd",
+            work_dir_in,
             "-B",
             f"{cfg.bids}:{bids_dir_in}:ro",
             "-B",
             f"{cfg.out}:{out_dir_in}",
             "-B",
-            f"{cfg.work}:{work_dir_in}",
+            f"{work_host}:{work_dir_in}",
             "-B",
             f"{cfg.fs_license}:{fs_license_in}:ro",
         ]
         if templateflow_host:
             cmd += ["-B", f"{templateflow_host}:{templateflow_container}"]
-            env_prefix = "APPTAINERENV" if singularity_bin == "apptainer" else "SINGULARITYENV"
-            cmd = [f"{env_prefix}_TEMPLATEFLOW_HOME={templateflow_container}"] + cmd
         cmd += [
             cfg.container,
             bids_dir_in,
@@ -156,18 +210,19 @@ def build_fmriprep_command(cfg: BuildConfig, subjects: List[str] | str) -> List[
         return cmd
 
     if cfg.container_runtime == "fmriprep-docker":
-        cmd = [
+        cmd = []
+        if templateflow_host:
+            cmd += ["env", f"TEMPLATEFLOW_HOME={templateflow_host}"]
+        cmd += [
             "fmriprep-docker",
             str(cfg.bids),
             str(cfg.out),
             *base_cli,
             "--work-dir",
-            str(cfg.work),
+            str(work_host),
             "--fs-license-file",
             str(cfg.fs_license),
         ]
-        if templateflow_host:
-            cmd += ["--env", f"TEMPLATEFLOW_HOME={templateflow_host}"]
         return cmd
 
     if cfg.container_runtime == "docker":
@@ -175,31 +230,37 @@ def build_fmriprep_command(cfg: BuildConfig, subjects: List[str] | str) -> List[
             "docker",
             "run",
             "--rm",
+            "-e",
+            f"MPLCONFIGDIR={work_dir_in}/.matplotlib",
+            "-e",
+            f"HOME={work_dir_in}/.home",
+            "-e",
+            f"NUMEXPR_MAX_THREADS={cfg.omp_threads}",
             "-v",
             f"{cfg.bids}:{bids_dir_in}:ro",
             "-v",
             f"{cfg.out}:{out_dir_in}",
             "-v",
-            f"{cfg.work}:{work_dir_in}",
+            f"{work_host}:{work_dir_in}",
             "-v",
             f"{cfg.fs_license}:{fs_license_in}:ro",
         ]
         if templateflow_host:
             cmd += [
-                "-v",
-                f"{templateflow_host}:{templateflow_container}",
                 "-e",
                 f"TEMPLATEFLOW_HOME={templateflow_container}",
+                "-v",
+                f"{templateflow_host}:{templateflow_container}",
             ]
         cmd += [
             cfg.container,
             bids_dir_in,
             out_dir_in,
             *base_cli,
-            "--work-dir",
-            work_dir_in,
             "--fs-license-file",
             fs_license_in,
+            "--work-dir",
+            work_dir_in,
         ]
         return cmd
 
@@ -636,3 +697,29 @@ def failed_subjects_from_status_dir(status_dir: Path) -> List[str]:
         return []
     subjects = [path.stem.rsplit(".", 1)[0] for path in status_dir.glob("*.failed")]
     return sorted(list(dict.fromkeys(subjects)))
+
+
+def classify_rerun_subjects(subjects: List[str], status_dir: Path) -> dict:
+    """Sort subjects without a ``.ok`` marker by how their last run ended.
+
+    ``failed``: fMRIPrep exited non-zero, so the batch wrote ``.failed``.
+    ``interrupted``: a ``.running`` marker was left behind. The batch shell
+    was killed before it could record an outcome, which is what a Slurm time
+    or memory limit, a cancellation or a node failure looks like.
+    ``not_started``: no marker at all; the array task never reached it.
+
+    Subjects with ``.failed`` markers but absent from ``subjects`` are
+    included so a stale manifest cannot hide a failure.
+    """
+    ordered = list(dict.fromkeys(subjects + failed_subjects_from_status_dir(status_dir)))
+    result = {"failed": [], "interrupted": [], "not_started": []}
+    for sub in sorted(ordered):
+        if (status_dir / f"{sub}.ok").exists():
+            continue
+        if (status_dir / f"{sub}.failed").exists():
+            result["failed"].append(sub)
+        elif (status_dir / f"{sub}.running").exists():
+            result["interrupted"].append(sub)
+        else:
+            result["not_started"].append(sub)
+    return result

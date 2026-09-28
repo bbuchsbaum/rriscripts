@@ -171,9 +171,24 @@ reads both:
   still need work.
 
 From those it writes a **new** bundle, in `rerun_failed_job/` next to the
-manifest, containing only the subjects with `.failed` markers. The original
-bundle is not modified, so you can repeat this as many times as you need —
-each round narrowing to whatever is still failing.
+manifest, containing every subject that has no `.ok` marker. That includes
+subjects left with a `.running` marker. That marker is what a timeout or
+out-of-memory kill leaves behind, because the shell is killed before it can write
+`.failed`. If the failures were time or memory limits, give the rerun more
+with `--time` or `--mem`.
+
+The original bundle is not modified; the rerun records its own markers in
+`rerun_failed_job/status/`. So the next round must start from the rerun's
+manifest, not the original one:
+
+```bash
+fmriprep_launcher.py rerun-failed --manifest "$JOB_DIR/rerun_failed_job/job_manifest.json"
+sbatch "$JOB_DIR/rerun_failed_job/rerun_failed_job/fmriprep_array.sbatch"
+```
+
+Each round then narrows to whatever is still unfinished. Pointing at the
+original manifest again is refused, because a rerun bundle already exists there.
+See [`rerun-failed`](../subcommands/#rerun-failed--retry-only-the-failed-subjects).
 
 :::note
 This only works if the run wrote a `job_manifest.json`. `slurm-array` always
@@ -205,7 +220,8 @@ JOB_DIR="${SCRATCH:-$PWD}/$(basename "$PWD")_fmriprep_job"
 fmriprep_launcher.py slurm-array --script-outdir "$JOB_DIR"
 sbatch "$JOB_DIR/fmriprep_array.sbatch"
 
-# 5. If subjects fail, generate and submit a retry bundle:
+# 5. If subjects fail, generate and submit a retry bundle
+#    (for a further round, pass the rerun's own job_manifest.json):
 fmriprep_launcher.py rerun-failed --manifest "$JOB_DIR/job_manifest.json"
 sbatch "$JOB_DIR/rerun_failed_job/fmriprep_array.sbatch"
 ```

@@ -36,16 +36,17 @@ from typing import Dict, List, Optional
 
 from fmriprep_backend import (
     BuildConfig,
-    build_fmriprep_command,
+    build_runnable_lines,
     build_config_from_manifest,
     build_job_manifest,
     create_slurm_script,
-    failed_subjects_from_status_dir,
+    classify_rerun_subjects,
     preflight_check,
     resolve_subjects_arg,
     write_subject_batches,
 )
 from fmriprep_shared import (
+    active_slurm_jobs,
     default_resources_from_env,
     default_script_outdir,
     detect_runtime,
@@ -215,9 +216,11 @@ def add_common_args(p: argparse.ArgumentParser, config: Dict[str, str] = None):
     )
     p.add_argument(
         "--skip-bids-validation",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=config.get("skip_bids_validation", "").lower() == "true",
-        help=help_with_default("Pass --skip-bids-validation", "skip_bids_validation"),
+        help=help_with_default(
+            "Pass --skip-bids-validation to fMRIPrep", "skip_bids_validation", "off"
+        ),
     )
     p.add_argument(
         "--output-spaces",
@@ -244,9 +247,11 @@ def add_common_args(p: argparse.ArgumentParser, config: Dict[str, str] = None):
     )
     p.add_argument(
         "--fs-reconall",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=config.get("fs_reconall", "").lower() == "true",
-        help=help_with_default("Run FreeSurfer recon-all", "fs_reconall", "off"),
+        help=help_with_default(
+            "Run FreeSurfer recon-all (off adds --fs-no-reconall)", "fs_reconall", "off"
+        ),
     )
     p.add_argument(
         "--use-syn-sdc",
@@ -266,6 +271,45 @@ def add_common_args(p: argparse.ArgumentParser, config: Dict[str, str] = None):
     )
 
 
+def _newest_image(images, where) -> Path:
+    """Pick the most recently modified image and say so when there was a choice.
+
+    The fMRIPrep version determines the outputs, so an implicit pick among
+    several images must be visible.
+    """
+    ranked = sorted(images, key=lambda p: Path(p).stat().st_mtime, reverse=True)
+    if len(ranked) > 1:
+        print(
+            f"Note: {len(ranked)} fMRIPrep images in {where}; using the most recently "
+            f"modified, {Path(ranked[0]).name}. Others: "
+            + ", ".join(Path(p).name for p in ranked[1:])
+            + ". Pass --container /path/file.sif to choose explicitly.",
+            file=sys.stderr,
+        )
+    return Path(ranked[0])
+
+
+def report_science_settings(cfg: BuildConfig) -> None:
+    """Print the choices that change fMRIPrep's results, not just its runtime."""
+    lines = [f"  Container: {cfg.container}"]
+    if cfg.fs_reconall:
+        lines.append("  FreeSurfer recon-all: on")
+    else:
+        lines.append(
+            "  FreeSurfer recon-all: OFF (--fs-no-reconall). fMRIPrep's own default is on; "
+            "enable with --fs-reconall or fs_reconall = true"
+        )
+    if cfg.skip_bids_validation:
+        lines.append(
+            "  BIDS validation: SKIPPED (--skip-bids-validation); "
+            "disable with --no-skip-bids-validation or skip_bids_validation = false"
+        )
+    else:
+        lines.append("  BIDS validation: on")
+    print("fMRIPrep settings that affect results:", file=sys.stderr)
+    print("\n".join(lines), file=sys.stderr)
+
+
 def choose_container(runtime: str, container_arg: str) -> str:
     if container_arg != "auto":
         # For singularity, validate it's a file not a directory
@@ -275,11 +319,7 @@ def choose_container(runtime: str, container_arg: str) -> str:
                 # Try to find a .sif/.simg in the directory
                 images = discover_sif_images(str(container_path))
                 if images:
-                    # Return the most recent one
-                    latest = sorted(
-                        images, key=lambda p: Path(p).stat().st_mtime, reverse=True
-                    )[0]
-                    return str(latest)
+                    return str(_newest_image(images, container_path))
                 else:
                     raise RuntimeError(
                         f"No .sif/.simg files found in directory: {container_path}"
@@ -292,10 +332,7 @@ def choose_container(runtime: str, container_arg: str) -> str:
         sif_dir = os.environ.get("FMRIPREP_SIF_DIR")
         images = discover_sif_images(sif_dir)
         if images:
-            latest = sorted(
-                images, key=lambda p: Path(p).stat().st_mtime, reverse=True
-            )[0]
-            return str(latest)
+            return str(_newest_image(images, sif_dir or "the default search path"))
         raise RuntimeError(
             "No fMRIPrep .sif/.simg found. Set FMRIPREP_SIF_DIR or pass --container /path/file.sif"
         )
@@ -676,9 +713,15 @@ def cmd_print(args):
         for e in errors:
             print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    report_science_settings(cfg)
+    print(
+        "# What each Slurm array task runs per subject "
+        "(the batch script also writes status markers).",
+        file=sys.stderr,
+    )
     for sub in subjects:
-        cmd = build_fmriprep_command(cfg, sub)
-        print("$ " + " ".join([str(c) for c in cmd]))
+        for line in build_runnable_lines(cfg, sub):
+            print("$ " + line)
 
 
 def cmd_slurm_array(args):
@@ -762,6 +805,7 @@ def cmd_slurm_array(args):
         for e in errors:
             print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    report_science_settings(cfg)
     warn_if_path_not_compute_writable(
         cfg.out,
         label="Output dir",
@@ -872,14 +916,76 @@ def cmd_rerun_failed(args):
         if args.status_dir
         else Path(manifest["job_bundle"]["status_dir"]).expanduser().resolve()
     )
-    failed_subjects = failed_subjects_from_status_dir(status_dir)
+    if not status_dir.is_dir():
+        raise SystemExit(
+            f"Status directory not found: {status_dir}\n"
+            "The job has not written any subject markers. Pass --status-dir if it moved."
+        )
+    slurm = manifest["slurm"]
+    groups = classify_rerun_subjects(
+        list(manifest["build_config"].get("subjects", [])), status_dir
+    )
+    failed_subjects = sorted(
+        groups["failed"] + groups["interrupted"] + groups["not_started"]
+    )
 
     if not failed_subjects:
-        print(f"No failed subjects found in {status_dir}")
+        print(f"All subjects in the manifest finished successfully ({status_dir})")
         return
 
+    print(f"Subjects to rerun, from {status_dir}:")
+    for key, label in (
+        ("failed", "fMRIPrep exited with an error (.failed)"),
+        (
+            "interrupted",
+            "killed before finishing (.running left behind; usually a Slurm "
+            "time or memory limit, a cancellation or a node failure)",
+        ),
+        ("not_started", "never started (no status marker)"),
+    ):
+        subs = groups[key]
+        if subs:
+            print(f"  {len(subs)} {label}:")
+            print(f"    {' '.join(subs)}")
+
+    rerun_job_name = args.job_name or f'{slurm["job_name"]}_rerun'
+    out_dir = (
+        args.script_outdir.expanduser().resolve()
+        if args.script_outdir
+        else manifest_path.parent / "rerun_failed_job"
+    )
+    if (out_dir / "fmriprep_array.sbatch").exists() and not args.allow_active:
+        raise SystemExit(
+            f"\nA rerun bundle already exists in {out_dir}.\n"
+            "Its status/ markers, not the ones read here, record how that rerun went. "
+            "For the next round, pass --manifest "
+            f"{out_dir / 'job_manifest.json'}.\n"
+            "Overwriting it would change subjects.txt under any of its tasks still "
+            "queued. Use --script-outdir for a separate bundle, or --allow-active "
+            "to overwrite it."
+        )
+
+    # Subjects that already failed may be running again in an earlier rerun.
+    names = list(dict.fromkeys([slurm["job_name"], rerun_job_name]))
+    active = active_slurm_jobs(names)
+    if active and not args.allow_active:
+        raise SystemExit(
+            f"\nSlurm still has job(s) named {' or '.join(repr(n) for n in names)} "
+            f"queued or running: {', '.join(active)}.\n"
+            "Those subjects may still be in progress; rerunning them now would write "
+            "to the same output and work directories.\n"
+            "Wait for the jobs to end, or pass --allow-active if they are unrelated."
+        )
+
+    if groups["interrupted"] or groups["not_started"]:
+        if groups["interrupted"] and not (args.time or args.mem):
+            print(
+                "\nNote: interrupted subjects rerun with the original limits "
+                f"(time {slurm['time']}, mem {slurm.get('mem') or 'unset'}). "
+                "Check sacct for TIMEOUT or OUT_OF_MEMORY and raise --time or --mem if so."
+            )
+
     cfg = build_config_from_manifest(manifest, failed_subjects)
-    slurm = manifest["slurm"]
     subjects_per_job = args.subjects_per_job or int(slurm.get("subjects_per_job", 1))
     stored_parallel_subjects = int(
         slurm.get("parallel_subjects", subjects_per_job)
@@ -915,11 +1021,10 @@ def cmd_rerun_failed(args):
         if mem_auto
         else slurm.get("mem")
     )
-    out_dir = (
-        args.script_outdir.expanduser().resolve()
-        if args.script_outdir
-        else manifest_path.parent / "rerun_failed_job"
-    )
+    if args.mem:
+        mem = None if args.mem.lower() == "none" else args.mem
+        mem_auto = False
+    time_limit = args.time or slurm["time"]
     out_dir.mkdir(parents=True, exist_ok=True)
 
     subj_file = out_dir / "subjects.txt"
@@ -933,7 +1038,7 @@ def cmd_rerun_failed(args):
         cfg=cfg,
         subject_file=subj_file,
         partition=slurm["partition"],
-        time=slurm["time"],
+        time=time_limit,
         cpus_per_task=cpus_per_task,
         mem=mem,
         account=slurm.get("account"),
@@ -942,7 +1047,7 @@ def cmd_rerun_failed(args):
         log_dir=log_dir,
         status_dir=rerun_status_dir,
         module_singularity=bool(slurm.get("module_singularity", False)),
-        job_name=args.job_name or f'{slurm["job_name"]}_rerun',
+        job_name=rerun_job_name,
         parallel_subjects=parallel_subjects,
         array_concurrency=array_concurrency,
         exclusive=exclusive,
@@ -958,13 +1063,13 @@ def cmd_rerun_failed(args):
         status_dir=rerun_status_dir,
         log_dir=log_dir,
         partition=slurm["partition"],
-        time=slurm["time"],
+        time=time_limit,
         cpus_per_task=cpus_per_task,
         mem=mem,
         account=slurm.get("account"),
         email=slurm.get("email"),
         mail_type=slurm.get("mail_type"),
-        job_name=args.job_name or f'{slurm["job_name"]}_rerun',
+        job_name=rerun_job_name,
         module_singularity=bool(slurm.get("module_singularity", False)),
         subjects_per_job=subjects_per_job,
         parallel_subjects=parallel_subjects,
@@ -976,7 +1081,7 @@ def cmd_rerun_failed(args):
     rerun_manifest_path = out_dir / "job_manifest.json"
     rerun_manifest_path.write_text(json.dumps(rerun_manifest, indent=2) + "\n")
 
-    print(f"Found {len(failed_subjects)} failed subject(s) in {status_dir}")
+    print(f"\nRerunning {len(failed_subjects)} subject(s)")
     print(f"Created {len(batches)} rerun batch(es)")
     print(f"Wrote Slurm script: {script_path}")
     print(f"Wrote subject list: {subj_file}")
@@ -1407,9 +1512,11 @@ def cmd_wizard_review(args, config):
         _validate_templateflow(final_tf)
 
     # Preview
-    preview_cmd = build_fmriprep_command(cfg, subjects[0])
+    print()
+    report_science_settings(cfg)
     print(f"\nExample command ({subjects[0]}):")
-    print(f"$ {' '.join(str(c) for c in preview_cmd)}")
+    for line in build_runnable_lines(cfg, subjects[0]):
+        print(f"$ {line}")
 
     # SLURM generation
     gen = input("\nGenerate SLURM array script? (Y/n): ").strip().lower()
@@ -1718,8 +1825,11 @@ def cmd_wizard_quick(args, config):
     cfg.work.mkdir(parents=True, exist_ok=True)
 
     # Preview
-    preview_cmd = build_fmriprep_command(cfg, selected_subjects[0])
-    print(f"\nExample command:\n$ {' '.join(preview_cmd)}")
+    print()
+    report_science_settings(cfg)
+    print("\nExample command:")
+    for line in build_runnable_lines(cfg, selected_subjects[0]):
+        print(f"$ {line}")
 
     # Generate SLURM script
     gen = ask("Generate SLURM array script?", choices=["y", "n"])
@@ -2070,7 +2180,7 @@ Environment variables: FMRIPREP_SIF_DIR, FS_LICENSE, TEMPLATEFLOW_HOME
     # rerun-failed
     p_rerun = sub.add_parser(
         "rerun-failed",
-        help="Generate a new Slurm bundle for subjects marked failed in a previous job",
+        help="Generate a new Slurm bundle for subjects that did not finish in a previous job",
     )
     p_rerun.add_argument(
         "--manifest", type=Path, required=True, help="Path to a prior job_manifest.json"
@@ -2113,6 +2223,22 @@ Environment variables: FMRIPREP_SIF_DIR, FS_LICENSE, TEMPLATEFLOW_HOME
     )
     p_rerun.add_argument(
         "--job-name", default=None, help="Override the rerun Slurm job name"
+    )
+    p_rerun.add_argument(
+        "--time",
+        default=None,
+        help="Override the per-task time limit (e.g. 48:00:00); use after a TIMEOUT",
+    )
+    p_rerun.add_argument(
+        "--mem",
+        default=None,
+        help="Override the per-task Slurm memory (e.g. 64G, or 'none'); use after OUT_OF_MEMORY",
+    )
+    p_rerun.add_argument(
+        "--allow-active",
+        action="store_true",
+        help="Build the rerun even if Slurm still lists jobs with the original or rerun "
+        "job name, or a rerun bundle already exists in the output directory",
     )
     p_rerun.set_defaults(func=cmd_rerun_failed)
 

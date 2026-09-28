@@ -284,8 +284,13 @@ fmriprep_launcher.py print-cmd \
     --output-spaces "MNI152NLin2009cAsym:res-2 T1w"
 ```
 
-Useful for inspecting exactly what will be invoked — including how your config
-keys became fMRIPrep flags and how the container bind mounts were computed.
+For each subject it prints two lines: a `mkdir -p` for the per-subject work
+directory (`<work>/sub-XX`), then the command an array task from `slurm-array`
+runs for that subject. The command has the same binds, container home and
+environment variables as the task and is shell-quoted, so the pair can be pasted
+into a shell as is. Only the `status/` markers the batch script writes are
+missing. The settings that change results (container, recon-all, BIDS
+validation) are reported on stderr, so stdout holds only commands.
 
 ## `rerun-failed` — retry only the failed subjects
 
@@ -296,7 +301,33 @@ fmriprep_launcher.py rerun-failed \
 
 Reads the manifest and `status/` markers from a previous run and writes a new
 bundle — in `rerun_failed_job/` next to the manifest by default — containing
-only subjects with `.failed` markers. The original bundle is not mutated.
+every manifest subject without an `.ok` marker. The original bundle is not
+mutated. It lists them in three groups:
+
+- **failed** — fMRIPrep exited with an error (`.failed`).
+- **killed before finishing** — a `.running` marker was left behind. Slurm time
+  and memory limits, `scancel` and node failures kill the batch shell before it
+  can record an outcome, so this is what they look like.
+- **never started** — no marker; the array task never reached the subject.
+
+A subject with a leftover marker may still be running, in the original job or
+in an earlier rerun. If `squeue` lists a job with the original job name or the
+rerun job name (`<job_name>_rerun` by default), `rerun-failed` stops instead of
+writing a bundle that would write to the same output and work directories. It
+also refuses to overwrite an existing rerun bundle. That bundle's own `status/`
+records how the rerun went, so the next round should use its
+`job_manifest.json`. `--allow-active` overrides both checks. Use it when the
+jobs listed are unrelated, e.g. another project using the default `fmriprep` job name.
+
+Subjects that hit a time or memory limit will hit it again with the same
+request. Check `sacct -j <jobid> --format=JobID,State,Elapsed,MaxRSS` for
+`TIMEOUT` or `OUT_OF_MEMORY`, then raise the limit for the rerun:
+
+```bash
+fmriprep_launcher.py rerun-failed \
+    --manifest /path/to/fmriprep_job/job_manifest.json \
+    --time 48:00:00 --mem 64G
+```
 
 Optional overrides:
 
@@ -309,7 +340,10 @@ fmriprep_launcher.py rerun-failed \
     --parallel-subjects 2 \
     --array-concurrency 3 \
     --exclusive \
-    --job-name fmriprep_retry
+    --job-name fmriprep_retry \
+    --time 48:00:00 \
+    --mem 64G \
+    --allow-active
 ```
 
 Without overrides, the rerun inherits all four scheduling settings from the

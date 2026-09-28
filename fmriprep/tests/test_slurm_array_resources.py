@@ -286,6 +286,7 @@ class SlurmArrayResourceTests(unittest.TestCase):
         status_dir = outdir / "status"
         for subject in ("sub-01", "sub-02", "sub-03"):
             (status_dir / f"{subject}.failed").touch()
+        (status_dir / "sub-04.ok").touch()
 
         rerun_dir = self.root / "rerun"
         rerun = subprocess.run(
@@ -328,6 +329,188 @@ class SlurmArrayResourceTests(unittest.TestCase):
         self.assertEqual(rerun_manifest["slurm"]["array_concurrency"], 1)
         self.assertFalse(rerun_manifest["slurm"]["exclusive"])
 
+
+    def run_rerun(self, manifest_path, *extra, env=None):
+        return subprocess.run(
+            [
+                sys.executable,
+                str(LAUNCHER),
+                "--no-default-config",
+                "rerun-failed",
+                "--manifest",
+                str(manifest_path),
+                "--script-outdir",
+                str(self.root / "rerun"),
+                *extra,
+            ],
+            cwd=str(self.root),
+            capture_output=True,
+            text=True,
+            env=self.launcher_env() if env is None else env,
+        )
+
+    def fake_squeue_env(self, output):
+        bindir = self.root / "fakebin"
+        bindir.mkdir(exist_ok=True)
+        squeue = bindir / "squeue"
+        squeue.write_text(f"#!/bin/sh\nprintf '%s' '{output}'\n")
+        squeue.chmod(0o755)
+        env = self.launcher_env()
+        env["PATH"] = f"{bindir}{os.pathsep}{env['PATH']}"
+        return env
+
+    def test_rerun_includes_subjects_killed_by_slurm_limits(self):
+        outdir, proc = self.run_launcher()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        status_dir = outdir / "status"
+        (status_dir / "sub-01.ok").touch()
+        (status_dir / "sub-02.failed").touch()
+        (status_dir / "sub-03.running").touch()  # shell killed at TIMEOUT/OOM
+
+        rerun = self.run_rerun(outdir / "job_manifest.json", env=self.fake_squeue_env(""))
+        self.assertEqual(rerun.returncode, 0, rerun.stderr)
+
+        rerun_subjects = (self.root / "rerun" / "subjects.txt").read_text().split()
+        self.assertEqual(rerun_subjects, ["sub-02", "sub-03", "sub-04"])
+        self.assertIn("killed before finishing", rerun.stdout)
+        self.assertIn("never started", rerun.stdout)
+        self.assertIn("raise --time or --mem", rerun.stdout)
+
+    def test_rerun_refuses_while_original_job_is_still_queued(self):
+        outdir, proc = self.run_launcher()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        (outdir / "status" / "sub-01.running").touch()
+
+        env = self.fake_squeue_env("123_4\n123_5\n")
+        rerun = self.run_rerun(outdir / "job_manifest.json", env=env)
+        self.assertNotEqual(rerun.returncode, 0)
+        self.assertIn("123", rerun.stderr)
+        self.assertFalse((self.root / "rerun" / "fmriprep_array.sbatch").exists())
+
+        allowed = self.run_rerun(outdir / "job_manifest.json", "--allow-active", env=env)
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_rerun_refuses_while_an_earlier_rerun_is_queued(self):
+        outdir, proc = self.run_launcher()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        (outdir / "status" / "sub-01.failed").touch()
+        bindir = self.root / "fakebin"
+        bindir.mkdir()
+        squeue = bindir / "squeue"
+        # Only report jobs when asked about the rerun's name.
+        squeue.write_text(
+            '#!/bin/sh\ncase "$*" in *fmriprep_rerun*) echo 777_[0-3];; esac\n'
+        )
+        squeue.chmod(0o755)
+        env = self.launcher_env()
+        env["PATH"] = f"{bindir}{os.pathsep}{env['PATH']}"
+
+        rerun = self.run_rerun(outdir / "job_manifest.json", env=env)
+        self.assertNotEqual(rerun.returncode, 0)
+        self.assertIn("777", rerun.stderr)
+
+    def test_rerun_will_not_overwrite_an_existing_rerun_bundle(self):
+        outdir, proc = self.run_launcher()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        (outdir / "status" / "sub-01.failed").touch()
+        first = self.run_rerun(outdir / "job_manifest.json")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        before = (self.root / "rerun" / "subjects.txt").read_text()
+
+        second = self.run_rerun(outdir / "job_manifest.json")
+        self.assertNotEqual(second.returncode, 0)
+        self.assertIn("rerun bundle already exists", second.stderr)
+        self.assertIn(str(self.root / "rerun" / "job_manifest.json"), second.stderr)
+        self.assertEqual((self.root / "rerun" / "subjects.txt").read_text(), before)
+
+    def test_rerun_time_and_mem_overrides_reach_script_and_manifest(self):
+        outdir, proc = self.run_launcher()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        (outdir / "status" / "sub-01.running").touch()
+
+        rerun = self.run_rerun(
+            outdir / "job_manifest.json", "--time", "48:00:00", "--mem", "64G",
+            env=self.fake_squeue_env(""),
+        )
+        self.assertEqual(rerun.returncode, 0, rerun.stderr)
+        text = (self.root / "rerun" / "fmriprep_array.sbatch").read_text()
+        self.assertEqual(sbatch_directive(text, "time"), "48:00:00")
+        self.assertEqual(sbatch_directive(text, "mem"), "64G")
+        manifest = json.loads((self.root / "rerun" / "job_manifest.json").read_text())
+        self.assertEqual(manifest["slurm"]["time"], "48:00:00")
+        self.assertEqual(manifest["slurm"]["mem"], "64G")
+        self.assertFalse(manifest["slurm"]["mem_auto"])
+
+    def test_rerun_reports_when_everything_finished(self):
+        outdir, proc = self.run_launcher()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        for sub in ("sub-01", "sub-02", "sub-03", "sub-04"):
+            (outdir / "status" / f"{sub}.ok").touch()
+        rerun = self.run_rerun(outdir / "job_manifest.json")
+        self.assertEqual(rerun.returncode, 0, rerun.stderr)
+        self.assertIn("finished successfully", rerun.stdout)
+        self.assertFalse((self.root / "rerun" / "fmriprep_array.sbatch").exists())
+
+    def run_print_cmd(self, *extra, config=None):
+        return subprocess.run(
+            [
+                sys.executable,
+                str(LAUNCHER),
+                "--no-default-config",
+                "--config",
+                str(config or self.config_path),
+                "print-cmd",
+                "--subjects",
+                "01",
+                *extra,
+            ],
+            cwd=str(self.root),
+            capture_output=True,
+            text=True,
+            env=self.launcher_env(),
+        )
+
+    def test_print_cmd_uses_per_subject_work_dir_and_reports_settings(self):
+        proc = self.run_print_cmd("--extra", '--output-layout "bids derivative"')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn(f"{self.work}/sub-01:/work", proc.stdout)
+        self.assertIn(f"$ mkdir -p {self.work}/sub-01/.home", proc.stdout)
+        self.assertIn("--home", proc.stdout)
+        # Shell-quoted so the printed command can be pasted as is.
+        self.assertIn("'bids derivative'", proc.stdout)
+        self.assertIn("FreeSurfer recon-all: OFF", proc.stderr)
+        self.assertIn("BIDS validation: on", proc.stderr)
+
+    def test_config_booleans_can_be_overridden_on_the_command_line(self):
+        cfg = self.root / "science.ini"
+        cfg.write_text(
+            self.config_path.read_text()
+            + "fs_reconall = true\nskip_bids_validation = true\n"
+        )
+        on = self.run_print_cmd(config=cfg)
+        self.assertEqual(on.returncode, 0, on.stderr)
+        self.assertNotIn("--fs-no-reconall", on.stdout)
+        self.assertIn("--skip-bids-validation", on.stdout)
+        self.assertIn("BIDS validation: SKIPPED", on.stderr)
+
+        off = self.run_print_cmd("--no-fs-reconall", "--no-skip-bids-validation", config=cfg)
+        self.assertEqual(off.returncode, 0, off.stderr)
+        self.assertIn("--fs-no-reconall", off.stdout)
+        self.assertNotIn("--skip-bids-validation", off.stdout)
+
+    def test_container_directory_names_the_image_it_picked(self):
+        images = self.root / "images"
+        images.mkdir()
+        old = images / "fmriprep_23.2.0.sif"
+        new = images / "fmriprep_24.1.0.sif"
+        old.touch()
+        new.touch()
+        os.utime(old, (1_000_000, 1_000_000))
+        proc = self.run_print_cmd("--container", str(images))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("using the most recently modified, fmriprep_24.1.0.sif", proc.stderr)
+        self.assertIn("Others: fmriprep_23.2.0.sif", proc.stderr)
+        self.assertIn(str(new), proc.stdout)
 
 if __name__ == "__main__":
     unittest.main()

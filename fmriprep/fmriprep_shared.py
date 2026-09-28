@@ -190,6 +190,34 @@ def run_cmd(cmd: List[str], check: bool = False) -> Tuple[int, str, str]:
         return 1, "", str(exc)
 
 
+def active_slurm_jobs(job_names: List[str]) -> List[str]:
+    """Return IDs of this user's queued or running Slurm jobs with any of ``job_names``.
+
+    Returns an empty list when squeue is unavailable (e.g. off-cluster), and
+    warns when squeue is present but fails, since that check is then skipped.
+    """
+    if not which("squeue"):
+        return []
+    import getpass
+
+    try:
+        user = getpass.getuser()
+    except Exception:
+        user = ""
+    cmd = ["squeue", "-h", "-n", ",".join(job_names), "-o", "%i"]
+    if user:
+        cmd[1:1] = ["-u", user]
+    code, out, err = run_cmd(cmd)
+    if code != 0:
+        print(
+            f"Warning: could not query Slurm ({err.strip() or 'squeue failed'}); "
+            "not checking for jobs still running.",
+            file=sys.stderr,
+        )
+        return []
+    return sorted({re.split(r"[_+]", line)[0] for line in out.split() if line.strip()})
+
+
 def parse_memory_to_mb(value: str | int) -> int:
     """Parse memory string (e.g., '32G', '760000', '2T') to MB."""
     if isinstance(value, int):

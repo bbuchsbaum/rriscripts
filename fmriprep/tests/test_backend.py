@@ -14,6 +14,8 @@ from fmriprep_backend import (  # noqa: E402
     build_config_from_manifest,
     build_job_manifest,
     build_fmriprep_command,
+    build_runnable_lines,
+    classify_rerun_subjects,
     create_slurm_script,
     create_subject_batches,
     failed_subjects_from_status_dir,
@@ -68,16 +70,69 @@ class FMRIPrepBackendTests(unittest.TestCase):
 
     def test_build_singularity_command_uses_shared_options(self):
         cfg = self.build_cfg()
-        with mock.patch("fmriprep_backend.which", side_effect=lambda cmd: "/usr/bin/singularity" if cmd == "singularity" else None):
+        with mock.patch("fmriprep_backend.which", side_effect=lambda cmd: "/usr/bin/singularity" if cmd == "singularity" else None), \
+                mock.patch("fmriprep_backend.run_cmd", return_value=(0, "singularity-ce version 3.11", "")):
             cmd = build_fmriprep_command(cfg, ["sub-01", "sub-02"])
 
         self.assertEqual(cmd[0], "SINGULARITYENV_TEMPLATEFLOW_HOME=/opt/templateflow")
-        self.assertEqual(cmd[1:4], ["singularity", "run", "--cleanenv"])
+        binary = cmd.index("singularity")
+        self.assertTrue(all(c.startswith("SINGULARITYENV_") for c in cmd[:binary]))
+        self.assertEqual(cmd[binary:binary + 3], ["singularity", "run", "--cleanenv"])
         self.assertIn("--participant-label", cmd)
         self.assertIn("01", cmd)
         self.assertIn("02", cmd)
         self.assertIn("--use-syn-sdc", cmd)
         self.assertIn("bids derivative", cmd)
+
+    def test_single_subject_command_is_what_the_array_task_runs(self):
+        cfg = self.build_cfg()
+        with mock.patch("fmriprep_backend.which", side_effect=lambda cmd: "/usr/bin/apptainer" if cmd == "apptainer" else None):
+            cmd = build_fmriprep_command(cfg, "sub-01")
+        subject_work = f"{self.work}/sub-01"
+
+        self.assertIn("APPTAINERENV_TEMPLATEFLOW_HOME=/opt/templateflow", cmd)
+        self.assertIn("APPTAINERENV_MPLCONFIGDIR=/work/.matplotlib", cmd)
+        self.assertIn("APPTAINERENV_NUMEXPR_MAX_THREADS=4", cmd)
+        self.assertEqual(cmd[cmd.index("--home") + 1], f"{subject_work}/.home")
+        self.assertEqual(cmd[cmd.index("--pwd") + 1], "/work")
+        self.assertIn(f"{subject_work}:/work", cmd)
+        self.assertNotIn(f"{self.work}:/work", cmd)
+        self.assertEqual(cmd[cmd.index("--work-dir") + 1], "/work")
+
+        # The batch script builds the same invocation from the same pieces.
+        subject_file = self.root / "subjects.txt"
+        write_subject_batches(subject_file, ["sub-01"])
+        text = create_slurm_script(
+            cfg=cfg, subject_file=subject_file, partition="p", time="1:00:00",
+            cpus_per_task=8, mem="32G", account=None, email=None, mail_type=None,
+            log_dir=self.root / "logs", status_dir=self.root / "status",
+        )
+        for piece in (
+            'SUBJECT_WORK_DIR="${WORK_DIR}/sub-${SUBJECT_ID}"',
+            '--home "$SUBJECT_WORK_DIR/.home"',
+            "--pwd /work",
+            '-B "$SUBJECT_WORK_DIR:/work"',
+            "_MPLCONFIGDIR=/work/.matplotlib",
+            "_NUMEXPR_MAX_THREADS=$OMP_THREADS",
+            "_TEMPLATEFLOW_HOME=/opt/templateflow",
+        ):
+            self.assertIn(piece, text)
+
+    def test_singularity_symlinked_to_apptainer_uses_apptainer_env(self):
+        cfg = self.build_cfg()
+        with mock.patch("fmriprep_backend.which", side_effect=lambda cmd: "/usr/bin/singularity" if cmd == "singularity" else None), \
+                mock.patch("fmriprep_backend.run_cmd", return_value=(0, "apptainer version 1.3.4", "")):
+            cmd = build_fmriprep_command(cfg, "sub-01")
+        self.assertIn("APPTAINERENV_MPLCONFIGDIR=/work/.matplotlib", cmd)
+        self.assertFalse(any(c.startswith("SINGULARITYENV_") for c in cmd))
+
+    def test_docker_single_subject_uses_per_subject_work_and_env(self):
+        cfg = self.build_cfg(container_runtime="docker", container="nipreps/fmriprep:24.1.0")
+        cmd = build_fmriprep_command(cfg, "sub-01")
+        self.assertIn(f"{self.work}/sub-01:/work", cmd)
+        self.assertIn("HOME=/work/.home", cmd)
+        self.assertIn("MPLCONFIGDIR=/work/.matplotlib", cmd)
+        self.assertIn("NUMEXPR_MAX_THREADS=4", cmd)
 
     def test_build_docker_command_skips_templateflow_when_disabled(self):
         cfg = self.build_cfg(
@@ -149,6 +204,10 @@ with open(os.environ["ARG_LOG"], "a") as stream:
     stream.write(json.dumps({{
         "argv": sys.argv[1:],
         "templateflow_home": os.environ.get("TEMPLATEFLOW_HOME"),
+        "container_env": {{
+            k: v for k, v in os.environ.items()
+            if k.startswith(("APPTAINERENV_", "SINGULARITYENV_"))
+        }},
     }}) + "\\n")
 """
         for name in ("apptainer", "docker", "fmriprep-docker"):
@@ -263,6 +322,30 @@ with open(os.environ["ARG_LOG"], "a") as stream:
                             f"{configured_templateflow}:/opt/templateflow", argv
                         )
                     self.assertNotIn(str(stale_templateflow), argv)
+
+                # The printed per-subject lines run exactly what the task ran.
+                printed_log = runtime_dir / "printed.jsonl"
+                env["ARG_LOG"] = str(printed_log)
+                with mock.patch.dict(os.environ, {"PATH": env["PATH"]}):
+                    lines = [
+                        line
+                        for sub in ("sub-01", "sub-02")
+                        for line in build_runnable_lines(cfg, sub)
+                    ]
+                proc = subprocess.run(
+                    ["bash", "-euc", "\n".join(lines)],
+                    env=env, capture_output=True, text=True,
+                )
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                printed = [json.loads(line) for line in printed_log.read_text().splitlines()]
+                self.assertEqual(printed, records)
+
+    def test_extra_participant_label_resolves_like_the_batch(self):
+        cfg = self.build_cfg(extra="--participant-label 99")
+        with mock.patch("fmriprep_backend.which", return_value="/usr/bin/apptainer"):
+            cmd = build_fmriprep_command(cfg, "sub-01")
+        # argparse keeps the last value; the batch appends the subject after CLI_BASE.
+        self.assertLess(cmd.index("99"), cmd.index("01"))
 
     def test_slurm_script_reports_out_of_range_array_index(self):
         subject_file = self.root / "subjects.txt"
@@ -384,6 +467,20 @@ with open(os.environ["ARG_LOG"], "a") as stream:
         (status_dir / "sub-02.ok").write_text("")
 
         self.assertEqual(failed_subjects_from_status_dir(status_dir), ["sub-01", "sub-03"])
+
+    def test_classify_rerun_subjects_covers_killed_and_unstarted_subjects(self):
+        status_dir = self.root / "status"
+        status_dir.mkdir()
+        (status_dir / "sub-01.ok").write_text("")
+        (status_dir / "sub-02.failed").write_text("")
+        (status_dir / "sub-03.running").write_text("")
+        (status_dir / "sub-09.failed").write_text("")  # not in the manifest
+
+        groups = classify_rerun_subjects(["sub-01", "sub-02", "sub-03", "sub-04"], status_dir)
+
+        self.assertEqual(groups["failed"], ["sub-02", "sub-09"])
+        self.assertEqual(groups["interrupted"], ["sub-03"])
+        self.assertEqual(groups["not_started"], ["sub-04"])
 
     # --- Preflight checks ---
 

@@ -32,7 +32,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-from fmriprep_backend import BuildConfig, build_fmriprep_command, create_slurm_script, write_subject_batches
+from fmriprep_backend import BuildConfig, build_runnable_lines, create_slurm_script, write_subject_batches
 from fmriprep_shared import (
     default_resources_from_env,
     detect_runtime_auto,
@@ -43,7 +43,7 @@ from fmriprep_shared import (
 )
 
 def build_fmriprep_cmds(cfg: BuildConfig):
-    return [build_fmriprep_command(cfg, sub) for sub in cfg.subjects]
+    return [line for sub in cfg.subjects for line in build_runnable_lines(cfg, sub)]
 
 # ---------------- GUI ----------------
 
@@ -474,7 +474,7 @@ class App(tk.Tk):
         cmds = build_fmriprep_cmds(cfg)
         self.txt.delete("1.0", tk.END)
         for c in cmds:
-            self.txt.insert(tk.END, "$ " + " ".join([str(x) for x in c]) + "\n")
+            self.txt.insert(tk.END, "$ " + c + "\n")
 
     def save_runner(self):
         cfg = self._validate_inputs()
@@ -490,7 +490,7 @@ class App(tk.Tk):
             f.write("#!/usr/bin/env bash\nset -euo pipefail\n\n")
             f.write(f'echo "Running fMRIPrep for {len(cfg.subjects)} subject(s)"\n')
             for c in cmds:
-                f.write(" ".join([str(x) for x in c]) + "\n")
+                f.write(c + "\n")
         os.chmod(script_path, 0o755)
         messagebox.showinfo("Saved", f"Saved: {script_path}")
 
