@@ -75,10 +75,10 @@ class App(tk.Tk):
         self.mem_mb = tk.IntVar(value=8000)
 
         # Flags
-        self.skip_val = tk.BooleanVar(value=True)
+        self.skip_val = tk.BooleanVar(value=False)
         self.aroma = tk.BooleanVar(value=False)
         self.cifti = tk.BooleanVar(value=False)
-        self.reconall = tk.BooleanVar(value=False)
+        self.reconall = tk.BooleanVar(value=True)
         self.synsdc = tk.BooleanVar(value=False)
         self.output_spaces = tk.StringVar(value="MNI152NLin2009cAsym:res-2 T1w")
         self.extra = tk.StringVar(value="")

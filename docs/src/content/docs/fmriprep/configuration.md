@@ -29,7 +29,6 @@ templateflow_home = /project/rrg-mypi/shared/opt/templateflow
 nprocs = 8
 omp_threads = 4
 mem_mb = 32000
-skip_bids_validation = true
 output_spaces = MNI152NLin2009cAsym:res-2 T1w
 fs_reconall = true
 use_syn_sdc = true
@@ -58,22 +57,25 @@ Later files override earlier ones:
 
 ## `[defaults]` keys
 
-The table reports behavior when a key is omitted. Generated starter configs
-intentionally set some lab-friendly defaults, including
-`skip_bids_validation = true` and `fs_reconall = true` — edit those for your
-study.
-
-The interactive paths start from different values when these keys are
-missing. Both `wizard` modes treat both keys as `true`. The TUI starts
-`skip_bids_validation` on and `fs_reconall` off. Whatever you leave them at is
-what the generated command or sbatch uses.
+The table reports behavior when a key is omitted. Every path (CLI, both
+`wizard` modes, the TUI and the GUI) uses the same defaults for the two keys
+that change results most: `fs_reconall = true` and
+`skip_bids_validation = false`. These match fMRIPrep's own defaults.
 
 Because recon-all, BIDS validation and the container version change the
 results rather than just the runtime, `print-cmd`, `slurm-array` and both
-wizard modes report all three on stderr before writing anything. When the recon-all default applies,
-the report says it is off and that fMRIPrep's own default is on. Boolean keys
+wizard modes report all three on stderr before writing anything. Boolean keys
 can be overridden per run in either direction, e.g. `--no-fs-reconall` or
-`--no-skip-bids-validation` against a config that sets them to `true`.
+`--skip-bids-validation`.
+
+:::caution[Changed default]
+Before this release, `fs_reconall` defaulted to `false` on the command line
+(the launcher added `--fs-no-reconall`), and generated configs and the
+interactive paths skipped BIDS validation. A config that sets either key keeps
+its value. A config that omits `fs_reconall` now runs recon-all, which takes
+several hours per subject and changes the outputs. To keep the old behavior,
+set `fs_reconall = false`.
+:::
 
 | Key | Type | Default if omitted | Description |
 |---|---|---|---|
@@ -88,8 +90,8 @@ can be overridden per run in either direction, e.g. `--no-fs-reconall` or
 | `omp_threads` | int | `min(8, nprocs)` | `--omp-nthreads` passed to fMRIPrep |
 | `mem_mb` | int/string | ~90% of available | Per-subject fMRIPrep memory limit in MB (also accepts `32G`, `2T`) |
 | `output_spaces` | string | — | Space-separated list, e.g. `MNI152NLin2009cAsym:res-2 T1w fsnative` |
-| `skip_bids_validation` | bool | `false` | Pass `--skip-bids-validation` (CLI: `--skip-bids-validation` / `--no-skip-bids-validation`) |
-| `fs_reconall` | bool | `false` | Run FreeSurfer `recon-all`; when `false` the launcher adds `--fs-no-reconall`, which differs from fMRIPrep's default. Generated project configs set this to `true` (CLI: `--fs-reconall` / `--no-fs-reconall`) |
+| `skip_bids_validation` | bool | `false` | Pass `--skip-bids-validation`, skipping the BIDS validator (CLI: `--skip-bids-validation` / `--no-skip-bids-validation`) |
+| `fs_reconall` | bool | `true` | Run FreeSurfer `recon-all`; `false` adds `--fs-no-reconall` (CLI: `--fs-reconall` / `--no-fs-reconall`) |
 | `use_syn_sdc` | bool | `false` | Enable SyN-based fieldmap-less distortion correction |
 | `cifti_output` | bool | `false` | Generate CIFTI outputs |
 | `use_aroma` | bool | `false` | **Deprecated.** ICA-AROMA was removed in fMRIPrep ≥ 23.1.0; the launcher errors if this is set. Delete it from configs carried over from older studies |

@@ -44,9 +44,9 @@ omp_threads  = 4
 mem_mb       = 32000                  # also accepts 32G, 2T
 
 # ── fMRIPrep options ───────────────────────────────────────────────────
-skip_bids_validation = true
+# skip_bids_validation = false       # true skips the BIDS validator
 # output_spaces      = MNI152NLin2009cAsym:res-2 T1w fsnative
-# fs_reconall        = true
+# fs_reconall        = true           # false adds --fs-no-reconall
 # use_syn_sdc        = false
 # cifti_output       = false
 # extra              = --stop-on-first-crash

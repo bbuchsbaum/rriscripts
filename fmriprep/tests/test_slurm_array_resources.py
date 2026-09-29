@@ -478,8 +478,19 @@ class SlurmArrayResourceTests(unittest.TestCase):
         self.assertIn("--home", proc.stdout)
         # Shell-quoted so the printed command can be pasted as is.
         self.assertIn("'bids derivative'", proc.stdout)
-        self.assertIn("FreeSurfer recon-all: OFF", proc.stderr)
+        self.assertIn("FreeSurfer recon-all: on", proc.stderr)
         self.assertIn("BIDS validation: on", proc.stderr)
+
+    def test_defaults_match_fmriprep_recon_all_and_validation_on(self):
+        # The test config sets neither key, so these are the launcher defaults.
+        proc = self.run_print_cmd()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("--fs-no-reconall", proc.stdout)
+        self.assertNotIn("--skip-bids-validation", proc.stdout)
+
+        off = self.run_print_cmd("--no-fs-reconall")
+        self.assertIn("--fs-no-reconall", off.stdout)
+        self.assertIn("FreeSurfer recon-all: OFF", off.stderr)
 
     def test_config_booleans_can_be_overridden_on_the_command_line(self):
         cfg = self.root / "science.ini"

@@ -217,7 +217,7 @@ def add_common_args(p: argparse.ArgumentParser, config: Dict[str, str] = None):
     p.add_argument(
         "--skip-bids-validation",
         action=argparse.BooleanOptionalAction,
-        default=config.get("skip_bids_validation", "").lower() == "true",
+        default=config.get("skip_bids_validation", "false").lower() == "true",
         help=help_with_default(
             "Pass --skip-bids-validation to fMRIPrep", "skip_bids_validation", "off"
         ),
@@ -248,9 +248,9 @@ def add_common_args(p: argparse.ArgumentParser, config: Dict[str, str] = None):
     p.add_argument(
         "--fs-reconall",
         action=argparse.BooleanOptionalAction,
-        default=config.get("fs_reconall", "").lower() == "true",
+        default=config.get("fs_reconall", "true").lower() == "true",
         help=help_with_default(
-            "Run FreeSurfer recon-all (off adds --fs-no-reconall)", "fs_reconall", "off"
+            "Run FreeSurfer recon-all (off adds --fs-no-reconall)", "fs_reconall", "on"
         ),
     )
     p.add_argument(
@@ -296,7 +296,7 @@ def report_science_settings(cfg: BuildConfig) -> None:
         lines.append("  FreeSurfer recon-all: on")
     else:
         lines.append(
-            "  FreeSurfer recon-all: OFF (--fs-no-reconall). fMRIPrep's own default is on; "
+            "  FreeSurfer recon-all: OFF (--fs-no-reconall); "
             "enable with --fs-reconall or fs_reconall = true"
         )
     if cfg.skip_bids_validation:
@@ -418,9 +418,9 @@ def _build_user_config():
         "mem_mb = 32000",
         "",
         "# ── fMRIPrep options ──",
-        "skip_bids_validation = true",
+        "# skip_bids_validation = false",
         "# output_spaces = MNI152NLin2009cAsym:res-2 T1w",
-        "# fs_reconall = true",
+        "# fs_reconall = true            # false adds --fs-no-reconall",
         "# use_syn_sdc = false",
         "# cifti_output = false",
         "",
@@ -504,7 +504,7 @@ def _build_project_config(target_dir, global_cfg):
         "# ── fMRIPrep options ──",
         f"output_spaces = {val('output_spaces', 'MNI152NLin2009cAsym:res-2 T1w')}",
         f"fs_reconall = {val('fs_reconall', 'true')}",
-        f"skip_bids_validation = {val('skip_bids_validation', 'true')}",
+        f"skip_bids_validation = {val('skip_bids_validation', 'false')}",
         f"use_syn_sdc = {val('use_syn_sdc', 'false')}",
         f"cifti_output = {val('cifti_output', 'false')}",
         "# extra = --stop-on-first-crash",
@@ -1251,7 +1251,7 @@ def cmd_wizard_review(args, config):
 
     # fMRIPrep flags
     output_spaces = config.get("output_spaces", "MNI152NLin2009cAsym:res-2 T1w")
-    skip_bids = config.get("skip_bids_validation", "true").lower() == "true"
+    skip_bids = config.get("skip_bids_validation", "false").lower() == "true"
     cifti_output = config.get("cifti_output", "false").lower() == "true"
     fs_reconall = config.get("fs_reconall", "true").lower() == "true"
     use_syn_sdc = config.get("use_syn_sdc", "false").lower() == "true"
@@ -1780,7 +1780,7 @@ def cmd_wizard_quick(args, config):
     omp_threads = int(config.get("omp_threads", str(min(8, nprocs))))
     mem_mb = int(config.get("mem_mb", str(mem_auto)))
     output_spaces = config.get("output_spaces", "MNI152NLin2009cAsym:res-2 T1w")
-    skip_bids_validation = config.get("skip_bids_validation", "true").lower() == "true"
+    skip_bids_validation = config.get("skip_bids_validation", "false").lower() == "true"
     use_aroma = config.get("use_aroma", "false").lower() == "true"
     cifti_output = config.get("cifti_output", "false").lower() == "true"
     fs_reconall = config.get("fs_reconall", "true").lower() == "true"

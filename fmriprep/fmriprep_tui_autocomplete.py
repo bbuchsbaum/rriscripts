@@ -375,7 +375,7 @@ class FMRIPrepAutocompleteTUI(App):
 
             with Vertical(id="fmriprep_flags"):
                 yield Horizontal(
-                    Switch(id="skip_bids", value=_cfgbool('skip_bids_validation', True)),
+                    Switch(id="skip_bids", value=_cfgbool('skip_bids_validation')),
                     Label("Skip BIDS Validation (faster)"),
                     classes="switch-row",
                 )
@@ -390,7 +390,7 @@ class FMRIPrepAutocompleteTUI(App):
                     classes="switch-row",
                 )
                 yield Horizontal(
-                    Switch(id="fs_reconall", value=_cfgbool('fs_reconall')),
+                    Switch(id="fs_reconall", value=_cfgbool('fs_reconall', True)),
                     Label("Run FreeSurfer recon-all"),
                     classes="switch-row",
                 )
