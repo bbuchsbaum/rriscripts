@@ -4,14 +4,15 @@ Tools for neuroimaging and SLURM-based HPC workflows.
 
 📖 **Documentation: <https://bbuchsbaum.github.io/rriscripts/>**
 
-The repository has three independent parts. Each is useful on its own, and you
-can install just the one you need.
+The repository contains three independent toolkits and reusable agent skills.
+You can install just the part you need.
 
 | Toolkit | What it does | Guide |
 |---|---|---|
 | [`qexec/`](qexec/) | SLURM job submission and command expansion | [qexec guide](https://bbuchsbaum.github.io/rriscripts/qexec/) |
 | [`fmriprep/`](fmriprep/) | Building and submitting fMRIPrep jobs for BIDS datasets | [fmriprep guide](https://bbuchsbaum.github.io/rriscripts/fmriprep/) |
 | [`xnat_cli/`](xnat_cli/) | Working with XNAT repositories from R | [xnat_cli guide](https://bbuchsbaum.github.io/rriscripts/xnat-cli/) |
+| [`skills/`](skills/) | Shared skills for Codex and Claude Code | [Alliance HPC skill](skills/alliance-hpc/) |
 
 ## Install
 
